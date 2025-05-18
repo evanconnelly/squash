@@ -7,7 +7,7 @@ import tailwindCaido from "@caido/tailwindcss";
 import path from "path";
 import prefixwrap from "postcss-prefixwrap";
 
-const id = "frontend-vue";
+const id = "squash";
 export default defineConfig({
   id,
   name: "Squash",
