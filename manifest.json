@@ -1,0 +1,26 @@
+{
+    "id": "squash",
+    "name": "Squash",
+    "version": "0.1.0",
+    "description": "Iteratively removes non-essential material from an HTTP request and opens the minimal form in Replay.",
+    "author": {
+      "name": "Evan Connelly",
+      "url": "https://github.com/your-handle"
+    },
+    "plugins": [
+      {
+        "kind": "frontend",
+        "id": "squash-frontend",
+        "name": "Squash UI",
+        "entrypoint": "packages/frontend/dist/index.js",
+        "backend": { "id": "squash-backend" }
+      },
+      {
+        "kind": "backend",
+        "id": "squash-backend",
+        "name": "Squash Engine",
+        "runtime": "javascript",
+        "entrypoint": "packages/backend/dist/index.js"
+      }
+    ]
+  }
