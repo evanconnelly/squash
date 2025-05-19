@@ -19,8 +19,7 @@ async function sendRequestWithTimeout(sdk, spec, retryCount = 0) {
       setTimeout(() => reject(new Error(`Request timed out after ${REQUEST_CONFIG.timeoutMs}ms`)), REQUEST_CONFIG.timeoutMs);
     });
     const requestPromise = sdk.requests.send(spec);
-    const result = await Promise.race([requestPromise, timeoutPromise]);
-    return result;
+    return await Promise.race([requestPromise, timeoutPromise]);
   } catch (error) {
     if (retryCount < REQUEST_CONFIG.maxRetries) {
       await delay(RATE_LIMIT.minDelayMs);
@@ -30,87 +29,35 @@ async function sendRequestWithTimeout(sdk, spec, retryCount = 0) {
   }
 }
 async function compareResponses(original, current) {
-  if (original.getCode() !== current.getCode()) {
-    return false;
-  }
-  const originalLength = original.getHeaders()?.["content-length"];
-  const currentLength = current.getHeaders()?.["content-length"];
-  if (originalLength !== currentLength) {
-    return false;
-  }
-  const originalContentType = original.getHeaders()?.["content-type"];
-  const currentContentType = current.getHeaders()?.["content-type"];
-  if (originalContentType !== currentContentType) {
-    return false;
-  }
-  const originalBody = original.getBody();
-  const currentBody = current.getBody();
-  if (originalBody?.length !== currentBody?.length) {
-    return false;
-  }
-  if (originalContentType?.includes("application/json")) {
+  if (original.getCode() !== current.getCode()) return false;
+  const origHeaders = original.getHeaders() || {};
+  const currHeaders = current.getHeaders() || {};
+  if (origHeaders["content-length"] !== currHeaders["content-length"]) return false;
+  if (origHeaders["content-type"] !== currHeaders["content-type"]) return false;
+  const origBody = original.getBody();
+  const currBody = current.getBody();
+  if (origBody?.length !== currBody?.length) return false;
+  const contentType = origHeaders["content-type"];
+  if (contentType?.includes("application/json")) {
     try {
-      const originalJson = JSON.parse(originalBody?.toString() || "{}");
-      const currentJson = JSON.parse(currentBody?.toString() || "{}");
-      const originalKeys = Object.keys(originalJson).sort();
-      const currentKeys = Object.keys(currentJson).sort();
-      if (JSON.stringify(originalKeys) !== JSON.stringify(currentKeys)) {
-        return false;
-      }
-    } catch (e) {
-      if (originalBody?.toString() !== currentBody?.toString()) {
-        return false;
-      }
+      const origJson = JSON.parse(origBody.toString() || "{}");
+      const currJson = JSON.parse(currBody.toString() || "{}");
+      const origKeys = Object.keys(origJson).sort();
+      const currKeys = Object.keys(currJson).sort();
+      if (JSON.stringify(origKeys) !== JSON.stringify(currKeys)) return false;
+    } catch {
+      if (origBody.toString() !== currBody.toString()) return false;
     }
   }
   return true;
 }
-function getAllHeaderCombinations(headers) {
-  const headerKeys = Object.keys(headers).filter((key) => headers[key] !== void 0);
-  const combinations = [];
-  for (let i = 1; i <= headerKeys.length; i++) {
-    const currentCombination = [];
-    generateCombinations(headerKeys, i, 0, currentCombination, combinations);
-  }
-  return combinations;
-}
-function generateCombinations(headers, size, start, current, result) {
-  if (current.length === size) {
-    result.push([...current]);
-    return;
-  }
-  for (let i = start; i < headers.length; i++) {
-    const header = headers[i];
-    if (header) {
-      current.push(header);
-      generateCombinations(headers, size, i + 1, current, result);
-      current.pop();
-    }
-  }
-}
 async function minimizeRequest(sdk, requestId) {
   try {
-    const request = await sdk.requests.get(requestId);
-    if (!request) {
-      return {
-        _type: "error",
-        message: "Request not found"
-      };
-    }
-    const spec = new RequestSpec("http://localhost:8080");
-    const reqData = request.request;
+    const reqWrapper = await sdk.requests.get(requestId);
+    const reqData = reqWrapper?.request;
     if (!reqData) {
-      return {
-        _type: "error",
-        message: "Request data not found"
-      };
+      return { _type: "error", message: "Request data not found" };
     }
-    spec.setMethod(reqData.getMethod());
-    spec.setHost(reqData.getHost());
-    spec.setPort(reqData.getPort());
-    spec.setPath(reqData.getPath());
-    spec.setTls(reqData.getPort() === 443);
-    const originalHeaders = reqData.getHeaders() || {};
     const originalSpec = new RequestSpec("http://localhost:8080");
     originalSpec.setMethod(reqData.getMethod());
     originalSpec.setHost(reqData.getHost());
@@ -119,129 +66,118 @@ async function minimizeRequest(sdk, requestId) {
     const pathAndQuery = fullUrl.substring(fullUrl.indexOf("/", 8));
     originalSpec.setPath(pathAndQuery);
     originalSpec.setTls(reqData.getPort() === 443);
-    const body = reqData.getBody();
-    if (body) {
-      originalSpec.setBody(body);
+    const initBody = reqData.getBody();
+    if (initBody) originalSpec.setBody(initBody);
+    const originalHeaders = reqData.getHeaders() || {};
+    for (const [h, v] of Object.entries(originalHeaders)) {
+      if (Array.isArray(v)) v.forEach((val) => originalSpec.setHeader(h, val));
+      else originalSpec.setHeader(h, v);
     }
-    Object.entries(originalHeaders).forEach(([key, value]) => {
-      if (Array.isArray(value)) {
-        value.forEach((v) => originalSpec.setHeader(key, v));
-      } else {
-        originalSpec.setHeader(key, value);
-      }
-    });
     await delay(RATE_LIMIT.minDelayMs);
-    const originalRequest = await sendRequestWithTimeout(sdk, originalSpec);
-    if (!originalRequest.response) {
-      return {
-        _type: "error",
-        message: "Failed to get original response"
-      };
+    const originalResult = await sendRequestWithTimeout(sdk, originalSpec);
+    if (!originalResult.response) {
+      return { _type: "error", message: "Failed to get original response" };
     }
-    const originalStatusCode = originalRequest.response.getCode();
-    if (originalStatusCode < 200 || originalStatusCode >= 300) {
-      return {
-        _type: "error",
-        message: `Original request failed with status code ${originalStatusCode}. Cannot minimize a failing request.`
-      };
+    const originalResp = originalResult.response;
+    const origStatus = originalResp.getCode();
+    if (origStatus < 200 || origStatus >= 300) {
+      return { _type: "error", message: `Original request failed with status ${origStatus}` };
     }
-    const headerCombinations = getAllHeaderCombinations(originalHeaders);
-    headerCombinations.sort((a, b) => a.length - b.length);
-    let minimalWorkingHeaders = null;
-    for (const headerSet of headerCombinations) {
+    const urlObj = new URL(reqData.getUrl());
+    let minimalQuery = new URLSearchParams(urlObj.searchParams);
+    for (const key of Array.from(urlObj.searchParams.keys())) {
       await delay(RATE_LIMIT.minDelayMs);
+      const trialQuery = new URLSearchParams(minimalQuery);
+      trialQuery.delete(key);
       const testSpec = new RequestSpec("http://localhost:8080");
       testSpec.setMethod(reqData.getMethod());
       testSpec.setHost(reqData.getHost());
       testSpec.setPort(reqData.getPort());
-      testSpec.setPath(pathAndQuery);
       testSpec.setTls(reqData.getPort() === 443);
-      headerSet.forEach((header) => {
-        const value = originalHeaders[header];
-        if (value) {
-          if (Array.isArray(value)) {
-            value.forEach((v) => testSpec.setHeader(header, v));
-          } else {
-            testSpec.setHeader(header, value);
-          }
-        }
-      });
-      if (body) {
-        testSpec.setBody(body);
+      testSpec.setPath(urlObj.pathname + (trialQuery.toString() ? "?" + trialQuery.toString() : ""));
+      if (initBody) testSpec.setBody(initBody);
+      for (const [h, v] of Object.entries(originalHeaders)) {
+        if (h.toLowerCase() === "host") continue;
+        if (Array.isArray(v)) v.forEach((val) => testSpec.setHeader(h, val));
+        else testSpec.setHeader(h, v);
       }
-      try {
-        const testRequest = await sendRequestWithTimeout(sdk, testSpec);
-        if (!testRequest.response) {
-          continue;
-        }
-        const isEquivalent = await compareResponses(originalRequest.response, testRequest.response);
-        if (isEquivalent) {
-          minimalWorkingHeaders = headerSet;
-          break;
-        }
-      } catch (error) {
-        sdk.console.log(`Error testing header combination: ${error instanceof Error ? error.message : "Unknown error"}`);
-        continue;
+      const trialResult = await sendRequestWithTimeout(sdk, testSpec);
+      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+        minimalQuery = trialQuery;
       }
     }
-    if (!minimalWorkingHeaders) {
-      return {
-        _type: "error",
-        message: "Could not find a minimal working set of headers"
-      };
-    }
-    minimalWorkingHeaders.forEach((header) => {
-      const value = originalHeaders[header];
-      if (value) {
-        if (Array.isArray(value)) {
-          value.forEach((v) => spec.setHeader(header, v));
-        } else {
-          spec.setHeader(header, value);
+    let minimalBody = initBody;
+    const contentType = originalHeaders["content-type"] || "";
+    if (contentType.includes("application/x-www-form-urlencoded") && initBody) {
+      let bodyParams = new URLSearchParams(initBody.toString());
+      for (const key of Array.from(bodyParams.keys())) {
+        await delay(RATE_LIMIT.minDelayMs);
+        const trialBody = new URLSearchParams(bodyParams);
+        trialBody.delete(key);
+        const testSpec = new RequestSpec("http://localhost:8080");
+        testSpec.setMethod(reqData.getMethod());
+        testSpec.setHost(reqData.getHost());
+        testSpec.setPort(reqData.getPort());
+        testSpec.setTls(reqData.getPort() === 443);
+        testSpec.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+        for (const [h, v] of Object.entries(originalHeaders)) {
+          if (h.toLowerCase() === "host") continue;
+          if (Array.isArray(v)) v.forEach((val) => testSpec.setHeader(h, val));
+          else testSpec.setHeader(h, v);
+        }
+        const bodyStr = trialBody.toString();
+        testSpec.setBody(bodyStr);
+        const trialResult = await sendRequestWithTimeout(sdk, testSpec);
+        if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+          bodyParams = trialBody;
+          minimalBody = Buffer.from(bodyStr);
         }
       }
-    });
-    if (body) {
-      spec.setBody(body);
     }
-    try {
+    let minimalHeaders = Object.keys(originalHeaders).filter((h) => h.toLowerCase() !== "host");
+    for (const headerKey of [...minimalHeaders]) {
       await delay(RATE_LIMIT.minDelayMs);
-      const sentRequest = await sendRequestWithTimeout(sdk, spec);
-      if (!sentRequest.response) {
-        return {
-          _type: "warning",
-          message: "Request minimized but no response received"
-        };
+      const trialSpecsH = new RequestSpec("http://localhost:8080");
+      trialSpecsH.setMethod(reqData.getMethod());
+      trialSpecsH.setHost(reqData.getHost());
+      trialSpecsH.setPort(reqData.getPort());
+      trialSpecsH.setTls(reqData.getPort() === 443);
+      trialSpecsH.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+      if (minimalBody) trialSpecsH.setBody(minimalBody);
+      for (const h of minimalHeaders.filter((h2) => h2 !== headerKey)) {
+        const vals = originalHeaders[h];
+        if (Array.isArray(vals)) vals.forEach((val) => trialSpecsH.setHeader(h, val));
+        else trialSpecsH.setHeader(h, vals);
       }
-      const session = await sdk.replay.createSession(spec);
-      if (!session) {
-        return {
-          _type: "warning",
-          message: "Request minimized but could not create replay session"
-        };
+      const trialResult = await sendRequestWithTimeout(sdk, trialSpecsH);
+      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+        minimalHeaders = minimalHeaders.filter((h) => h !== headerKey);
       }
-      let domain = spec.getHost();
-      let port = spec.getPort();
-      let path = spec.getPath();
-      let id = session.getId();
-      let code = sentRequest.response.getCode();
-      sdk.console.log(`REQ ${id}: ${domain}:${port}${path} received a status code of ${code}`);
-      return {
-        _type: "success",
-        message: "Request minimized successfully",
-        statusCode: code,
-        requestId: id
-      };
-    } catch (error) {
-      return {
-        _type: "error",
-        message: error instanceof Error ? error.message : "Unknown error occurred"
-      };
     }
-  } catch (error) {
+    const finalSpec = new RequestSpec("http://localhost:8080");
+    finalSpec.setMethod(reqData.getMethod());
+    finalSpec.setHost(reqData.getHost());
+    finalSpec.setPort(reqData.getPort());
+    finalSpec.setTls(reqData.getPort() === 443);
+    finalSpec.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+    if (minimalBody) finalSpec.setBody(minimalBody);
+    for (const h of minimalHeaders) {
+      const vals = originalHeaders[h];
+      if (Array.isArray(vals)) vals.forEach((val) => finalSpec.setHeader(h, val));
+      else finalSpec.setHeader(h, vals);
+    }
+    await delay(RATE_LIMIT.minDelayMs);
+    const finalResult = await sendRequestWithTimeout(sdk, finalSpec);
+    const session = finalResult.response ? await sdk.replay.createSession(finalSpec) : null;
+    if (session) sdk.console.log(`REQ ${session.getId()}:${reqData.getHost()}${urlObj.pathname} => ${finalResult.response.getCode()}`);
     return {
-      _type: "error",
-      message: error instanceof Error ? error.message : "Unknown error occurred"
+      _type: session ? "success" : "warning",
+      message: session ? "Request minimized successfully" : "Minimized but could not open replay session",
+      statusCode: finalResult.response?.getCode(),
+      requestId: session?.getId()
     };
+  } catch (error) {
+    return { _type: "error", message: error instanceof Error ? error.message : "Unknown error" };
   }
 }
 function init(sdk) {
