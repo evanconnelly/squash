@@ -1,33 +1,47 @@
 import { RequestSpec } from "caido:utils";
 import { SDK, DefineAPI } from "caido:plugin";
 
-// Rate limiting configuration
-const RATE_LIMIT = {
-  requestsPerSecond: 2,
-  minDelayMs: 500,
-};
-
-// Request configuration
-const REQUEST_CONFIG = {
-  timeoutMs: 30000,
-  maxRetries: 2,
+// Default configuration values
+const DEFAULT_CONFIG = {
+  rateLimit: {
+    minDelayMs: 500,
+  },
+  requestConfig: {
+    timeoutMs: 30000,
+    maxRetries: 2,
+  },
+  autoRemovedHeaders: ['sec-*']
 };
 
 // Helper to delay execution
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Helper to check if a header should be auto-removed
+function shouldRemoveHeader(sdk: SDK<any>, headerName: string, patterns: string[]): boolean {
+  sdk.console.log(`Checking header ${headerName} against patterns ${patterns}`);
+  return patterns.some(pattern => {
+    try {
+      const regex = new RegExp(pattern.replaceAll('*', '.*'), 'i');
+      return regex.test(headerName);
+    } catch {
+      return pattern.toLowerCase() === headerName.toLowerCase();
+    }
+  });
+}
+
 // Wrapper to send requests with timeout and retries
-async function sendRequestWithTimeout(sdk: SDK<any>, spec: RequestSpec, retryCount = 0): Promise<any> {
+async function sendRequestWithTimeout(sdk: SDK<any>, spec: RequestSpec, config: any = DEFAULT_CONFIG, retryCount = 0): Promise<any> {
+
   try {
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`Request timed out after ${REQUEST_CONFIG.timeoutMs}ms`)), REQUEST_CONFIG.timeoutMs);
+      setTimeout(() => reject(new Error(`Request timed out after ${config.requestConfig.timeoutMs}ms`)), config.requestConfig.timeoutMs);
     });
     const requestPromise = sdk.requests.send(spec);
     return await Promise.race([requestPromise, timeoutPromise]);
   } catch (error) {
-    if (retryCount < REQUEST_CONFIG.maxRetries) {
-      await delay(RATE_LIMIT.minDelayMs);
-      return sendRequestWithTimeout(sdk, spec, retryCount + 1);
+    if (retryCount < config.requestConfig.maxRetries) {
+      await delay(config.rateLimit.minDelayMs);
+      return sendRequestWithTimeout(sdk, spec, config, retryCount + 1);
     }
     throw error;
   }
@@ -70,7 +84,7 @@ interface MinimizeResult {
 }
 
 // Main minimization routine
-async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<MinimizeResult> {
+async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = DEFAULT_CONFIG): Promise<MinimizeResult> {
   try {
     // Fetch original request
     const reqWrapper = await sdk.requests.get(requestId);
@@ -96,15 +110,13 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
     }
 
     // Send baseline
-    await delay(RATE_LIMIT.minDelayMs);
-    const originalResult = await sendRequestWithTimeout(sdk, originalSpec);
+    const originalResult = await sendRequestWithTimeout(sdk, originalSpec, config);
     const originalResp = originalResult.response;
     if (!originalResp) return { _type: 'error', message: 'Failed to get original response' };
 
     // 1. Minimize query parameters
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
     for (const key of Array.from(urlObj.searchParams.keys())) {
-      await delay(RATE_LIMIT.minDelayMs);
       const trialQuery = new URLSearchParams(minimalQuery);
       trialQuery.delete(key);
       const testSpec = new RequestSpec('http://localhost:8080');
@@ -119,7 +131,8 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
         if (Array.isArray(v)) v.forEach(val => testSpec.setHeader(h, val));
         else testSpec.setHeader(h, v);
       }
-      const trialResult = await sendRequestWithTimeout(sdk, testSpec);
+      await delay(config.rateLimit.minDelayMs);
+      const trialResult = await sendRequestWithTimeout(sdk, testSpec, config);
       if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
         minimalQuery = trialQuery;
       }
@@ -131,7 +144,6 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
     if (contentType.includes('application/x-www-form-urlencoded') && initBody) {
       let bodyParams = new URLSearchParams(initBody.toString());
       for (const key of Array.from(bodyParams.keys())) {
-        await delay(RATE_LIMIT.minDelayMs);
         const trialBody = new URLSearchParams(bodyParams);
         trialBody.delete(key);
         const testSpec = new RequestSpec('http://localhost:8080');
@@ -147,7 +159,8 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
         }
         const bodyStr = trialBody.toString();
         testSpec.setBody(bodyStr);
-        const trialResult = await sendRequestWithTimeout(sdk, testSpec);
+        await delay(config.rateLimit.minDelayMs);
+        const trialResult = await sendRequestWithTimeout(sdk, testSpec, config);
         if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
           bodyParams = trialBody;
           minimalBody = Buffer.from(bodyStr);
@@ -158,7 +171,13 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
     // 3. Minimize headers (skip Host)
     let minimalHeaders = Object.keys(originalHeaders).filter(h => h.toLowerCase() !== 'host');
     for (const headerKey of [...minimalHeaders]) {
-      await delay(RATE_LIMIT.minDelayMs);
+
+      // Skip if header matches auto-removed patterns
+      if (shouldRemoveHeader(sdk,headerKey, config?.autoRemovedHeaders ?? DEFAULT_CONFIG.autoRemovedHeaders)) {
+        minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
+        sdk.console.log(`Removed header ${headerKey}`);
+        continue;
+      }
 
       // Special-case Cookie header
       if (headerKey.toLowerCase() === 'cookie') {
@@ -179,7 +198,7 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
           if (Array.isArray(vals)) vals.forEach(val => removeAll.setHeader(h, val));
           else removeAll.setHeader(h, vals as string);
         }
-        const allResult = await sendRequestWithTimeout(sdk, removeAll);
+        const allResult = await sendRequestWithTimeout(sdk, removeAll, config);
         if (allResult.response && await compareResponses(originalResp, allResult.response)) {
           minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
           continue;
@@ -187,7 +206,6 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
 
         // Otherwise try each cookie
         for (const cookie of [...cookies]) {
-          await delay(RATE_LIMIT.minDelayMs);
           const remaining = cookies.filter(c => c !== cookie);
           const spec = new RequestSpec('http://localhost:8080');
           spec.setMethod(reqData.getMethod());
@@ -205,7 +223,8 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
               else spec.setHeader(h, vals as string);
             }
           }
-          const result = await sendRequestWithTimeout(sdk, spec);
+          await delay(config.rateLimit.minDelayMs);
+          const result = await sendRequestWithTimeout(sdk, spec, config);
           if (result.response && await compareResponses(originalResp, result.response)) {
             cookies = remaining;
             if (remaining.length) {
@@ -231,7 +250,8 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
         if (Array.isArray(vals)) vals.forEach(val => test.setHeader(h, val));
         else test.setHeader(h, vals as string);
       }
-      const res = await sendRequestWithTimeout(sdk, test);
+      await delay(config.rateLimit.minDelayMs);
+      const res = await sendRequestWithTimeout(sdk, test, config);
       if (res.response && await compareResponses(originalResp, res.response)) {
         minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
       }
@@ -251,8 +271,8 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
       else finalSpec.setHeader(h, vals as string);
     }
 
-    await delay(RATE_LIMIT.minDelayMs);
-    const finalResult = await sendRequestWithTimeout(sdk, finalSpec);
+    await delay(config.rateLimit.minDelayMs);
+    const finalResult = await sendRequestWithTimeout(sdk, finalSpec, config);
     const session = finalResult.response
       ? await sdk.replay.createSession(finalSpec)
       : null;
