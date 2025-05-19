@@ -135,6 +135,62 @@ async function minimizeRequest(sdk, requestId) {
       }
     }
     let minimalHeaders = Object.keys(originalHeaders).filter((h) => h.toLowerCase() !== "host");
+    const cookieHeader = minimalHeaders.find((h) => h.toLowerCase() === "cookie");
+    if (cookieHeader) {
+      await delay(RATE_LIMIT.minDelayMs);
+      const trialSpecsH = new RequestSpec("http://localhost:8080");
+      trialSpecsH.setMethod(reqData.getMethod());
+      trialSpecsH.setHost(reqData.getHost());
+      trialSpecsH.setPort(reqData.getPort());
+      trialSpecsH.setTls(reqData.getPort() === 443);
+      trialSpecsH.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+      if (minimalBody) trialSpecsH.setBody(minimalBody);
+      for (const h of minimalHeaders.filter((h2) => h2.toLowerCase() !== "cookie")) {
+        const vals = originalHeaders[h];
+        if (Array.isArray(vals)) vals.forEach((val) => trialSpecsH.setHeader(h, val));
+        else if (vals) trialSpecsH.setHeader(h, vals);
+      }
+      const trialResult = await sendRequestWithTimeout(sdk, trialSpecsH);
+      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+        minimalHeaders = minimalHeaders.filter((h) => h.toLowerCase() !== "cookie");
+      } else {
+        const cookieValue = originalHeaders[cookieHeader];
+        if (cookieValue) {
+          const cookies = Array.isArray(cookieValue) ? cookieValue : [cookieValue];
+          for (const cookie of cookies) {
+            await delay(RATE_LIMIT.minDelayMs);
+            const trialSpecsH2 = new RequestSpec("http://localhost:8080");
+            trialSpecsH2.setMethod(reqData.getMethod());
+            trialSpecsH2.setHost(reqData.getHost());
+            trialSpecsH2.setPort(reqData.getPort());
+            trialSpecsH2.setTls(reqData.getPort() === 443);
+            trialSpecsH2.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+            if (minimalBody) trialSpecsH2.setBody(minimalBody);
+            for (const h of minimalHeaders) {
+              if (h.toLowerCase() === "cookie") {
+                const remainingCookies = cookies.filter((c) => c !== cookie);
+                if (remainingCookies.length > 0) {
+                  trialSpecsH2.setHeader(h, remainingCookies.join("; "));
+                }
+              } else {
+                const vals = originalHeaders[h];
+                if (Array.isArray(vals)) vals.forEach((val) => trialSpecsH2.setHeader(h, val));
+                else if (vals) trialSpecsH2.setHeader(h, vals);
+              }
+            }
+            const trialResult2 = await sendRequestWithTimeout(sdk, trialSpecsH2);
+            if (trialResult2.response && await compareResponses(originalResp, trialResult2.response)) {
+              const remainingCookies = cookies.filter((c) => c !== cookie);
+              if (remainingCookies.length > 0) {
+                originalHeaders[cookieHeader] = remainingCookies;
+              } else {
+                minimalHeaders = minimalHeaders.filter((h) => h.toLowerCase() !== "cookie");
+              }
+            }
+          }
+        }
+      }
+    }
     for (const headerKey of [...minimalHeaders]) {
       await delay(RATE_LIMIT.minDelayMs);
       const trialSpecsH = new RequestSpec("http://localhost:8080");
