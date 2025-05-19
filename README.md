@@ -14,5 +14,5 @@ Squash is a Caido plugin that adds a right-click context menu option to minimize
 ## Usage
 <img src="/assets/menu.png" alt="Menu Image" width="400">
 
-Right click an HTTP request in Caido - > Plugins - > Squash -> Minimize Request
-the minimized request will open in a new Replay tab for review and testing
+- Right click an HTTP request in Caido - > Plugins - > Squash -> Minimize Request
+- The minimized request will open in a new Replay tab for review and testing
