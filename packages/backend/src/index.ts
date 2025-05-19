@@ -98,10 +98,8 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
     // Send baseline
     await delay(RATE_LIMIT.minDelayMs);
     const originalResult = await sendRequestWithTimeout(sdk, originalSpec);
-    if (!originalResult.response) return { _type: 'error', message: 'Failed to get original response' };
     const originalResp = originalResult.response;
-    const origStatus = originalResp.getCode();
-    if (origStatus < 200 || origStatus >= 300) return { _type: 'error', message: `Original request failed with status ${origStatus}` };
+    if (!originalResp) return { _type: 'error', message: 'Failed to get original response' };
 
     // 1. Minimize query parameters
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
