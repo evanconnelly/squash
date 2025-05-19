@@ -8,8 +8,8 @@ Squash is a Caido plugin that adds a right-click context menu option to minimize
 	5.	Sends the minimized request to a new Replay tab for review and testing
 
 ## Installation
-Download plugin_package.zip from https://github.com/evanconnelly/squash/releases
-Add to Caido: https://docs.caido.io/guides/plugins
+- Download plugin_package.zip from https://github.com/evanconnelly/squash/releases
+- Add to Caido: https://docs.caido.io/guides/plugins
 
 ## Usage
 <img src="/assets/menu.png" alt="Menu Image" width="400">
