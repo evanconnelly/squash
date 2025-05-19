@@ -12,7 +12,7 @@ Download plugin_package.zip from https://github.com/evanconnelly/squash/releases
 Add to Caido: https://docs.caido.io/guides/plugins
 
 ## Usage
-![Menu Image](/assets/menu.png)
+<img src="/assets/menu.png" alt="Menu Image" width="400">
 
 Right click a HTTP request in Caido - > Plugins - > Squash -> Minimize Request
 the minimized request will open in a new Replay tab for review and testing
