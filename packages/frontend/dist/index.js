@@ -1,4 +1,4 @@
-function t(e) {
+function n(e) {
   e.commands.register("squash.minimize", {
     name: "Squash – Minimize Request",
     group: "Squash",
@@ -31,7 +31,7 @@ function t(e) {
         i = s.id;
       }
       if (!i) {
-        e.window.showToast("Request missing ID", { variant: "error" });
+        e.window.showToast("Request missing ID (if in replay, be sure to send request before minimizing)", { variant: "error" });
         return;
       }
       e.window.showToast("Squashing…", { variant: "info", duration: 1500 });
@@ -58,5 +58,5 @@ function t(e) {
   });
 }
 export {
-  t as init
+  n as init
 };

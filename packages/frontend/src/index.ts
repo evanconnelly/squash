@@ -45,7 +45,7 @@ export function init(sdk: CaidoSDK) {
       }
 
       if (!requestId) {
-        sdk.window.showToast("Request missing ID", { variant: "error" });
+        sdk.window.showToast("Request missing ID (if in replay, be sure to send request before minimizing)", { variant: "error" });
         return;
       }
 
