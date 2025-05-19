@@ -2,15 +2,11 @@
 import { RequestSpec } from "caido:utils";
 var RATE_LIMIT = {
   requestsPerSecond: 2,
-  // Maximum 2 requests per second
   minDelayMs: 500
-  // Minimum 500ms between requests
 };
 var REQUEST_CONFIG = {
   timeoutMs: 3e4,
-  // 30 second timeout for requests
   maxRetries: 2
-  // Maximum number of retries for failed requests
 };
 var delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function sendRequestWithTimeout(sdk, spec, retryCount = 0) {
@@ -55,16 +51,14 @@ async function minimizeRequest(sdk, requestId) {
   try {
     const reqWrapper = await sdk.requests.get(requestId);
     const reqData = reqWrapper?.request;
-    if (!reqData) {
-      return { _type: "error", message: "Request data not found" };
-    }
+    if (!reqData) return { _type: "error", message: "Request data not found" };
     const originalSpec = new RequestSpec("http://localhost:8080");
     originalSpec.setMethod(reqData.getMethod());
     originalSpec.setHost(reqData.getHost());
     originalSpec.setPort(reqData.getPort());
     const fullUrl = reqData.getUrl();
-    const pathAndQuery = fullUrl.substring(fullUrl.indexOf("/", 8));
-    originalSpec.setPath(pathAndQuery);
+    const urlObj = new URL(fullUrl);
+    originalSpec.setPath(urlObj.pathname + urlObj.search);
     originalSpec.setTls(reqData.getPort() === 443);
     const initBody = reqData.getBody();
     if (initBody) originalSpec.setBody(initBody);
@@ -75,15 +69,10 @@ async function minimizeRequest(sdk, requestId) {
     }
     await delay(RATE_LIMIT.minDelayMs);
     const originalResult = await sendRequestWithTimeout(sdk, originalSpec);
-    if (!originalResult.response) {
-      return { _type: "error", message: "Failed to get original response" };
-    }
+    if (!originalResult.response) return { _type: "error", message: "Failed to get original response" };
     const originalResp = originalResult.response;
     const origStatus = originalResp.getCode();
-    if (origStatus < 200 || origStatus >= 300) {
-      return { _type: "error", message: `Original request failed with status ${origStatus}` };
-    }
-    const urlObj = new URL(reqData.getUrl());
+    if (origStatus < 200 || origStatus >= 300) return { _type: "error", message: `Original request failed with status ${origStatus}` };
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
     for (const key of Array.from(urlObj.searchParams.keys())) {
       await delay(RATE_LIMIT.minDelayMs);
@@ -135,78 +124,74 @@ async function minimizeRequest(sdk, requestId) {
       }
     }
     let minimalHeaders = Object.keys(originalHeaders).filter((h) => h.toLowerCase() !== "host");
-    const cookieHeader = minimalHeaders.find((h) => h.toLowerCase() === "cookie");
-    if (cookieHeader) {
+    for (const headerKey of [...minimalHeaders]) {
       await delay(RATE_LIMIT.minDelayMs);
-      const trialSpecsH = new RequestSpec("http://localhost:8080");
-      trialSpecsH.setMethod(reqData.getMethod());
-      trialSpecsH.setHost(reqData.getHost());
-      trialSpecsH.setPort(reqData.getPort());
-      trialSpecsH.setTls(reqData.getPort() === 443);
-      trialSpecsH.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
-      if (minimalBody) trialSpecsH.setBody(minimalBody);
-      for (const h of minimalHeaders.filter((h2) => h2.toLowerCase() !== "cookie")) {
-        const vals = originalHeaders[h];
-        if (Array.isArray(vals)) vals.forEach((val) => trialSpecsH.setHeader(h, val));
-        else if (vals) trialSpecsH.setHeader(h, vals);
-      }
-      const trialResult = await sendRequestWithTimeout(sdk, trialSpecsH);
-      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
-        minimalHeaders = minimalHeaders.filter((h) => h.toLowerCase() !== "cookie");
-      } else {
-        const cookieValue = originalHeaders[cookieHeader];
-        if (cookieValue) {
-          const cookies = Array.isArray(cookieValue) ? cookieValue : [cookieValue];
-          for (const cookie of cookies) {
-            await delay(RATE_LIMIT.minDelayMs);
-            const trialSpecsH2 = new RequestSpec("http://localhost:8080");
-            trialSpecsH2.setMethod(reqData.getMethod());
-            trialSpecsH2.setHost(reqData.getHost());
-            trialSpecsH2.setPort(reqData.getPort());
-            trialSpecsH2.setTls(reqData.getPort() === 443);
-            trialSpecsH2.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
-            if (minimalBody) trialSpecsH2.setBody(minimalBody);
-            for (const h of minimalHeaders) {
-              if (h.toLowerCase() === "cookie") {
-                const remainingCookies = cookies.filter((c) => c !== cookie);
-                if (remainingCookies.length > 0) {
-                  trialSpecsH2.setHeader(h, remainingCookies.join("; "));
-                }
-              } else {
-                const vals = originalHeaders[h];
-                if (Array.isArray(vals)) vals.forEach((val) => trialSpecsH2.setHeader(h, val));
-                else if (vals) trialSpecsH2.setHeader(h, vals);
-              }
+      if (headerKey.toLowerCase() === "cookie") {
+        const raw = originalHeaders[headerKey];
+        const cookieStr = Array.isArray(raw) ? raw.join("; ") : raw || "";
+        let cookies = cookieStr.split(";").map((c) => c.trim()).filter((c) => c);
+        const removeAll = new RequestSpec("http://localhost:8080");
+        removeAll.setMethod(reqData.getMethod());
+        removeAll.setHost(reqData.getHost());
+        removeAll.setPort(reqData.getPort());
+        removeAll.setTls(reqData.getPort() === 443);
+        removeAll.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+        if (minimalBody) removeAll.setBody(minimalBody);
+        for (const h of minimalHeaders.filter((h2) => h2.toLowerCase() !== "cookie")) {
+          const vals = originalHeaders[h];
+          if (Array.isArray(vals)) vals.forEach((val) => removeAll.setHeader(h, val));
+          else removeAll.setHeader(h, vals);
+        }
+        const allResult = await sendRequestWithTimeout(sdk, removeAll);
+        if (allResult.response && await compareResponses(originalResp, allResult.response)) {
+          minimalHeaders = minimalHeaders.filter((h) => h !== headerKey);
+          continue;
+        }
+        for (const cookie of [...cookies]) {
+          await delay(RATE_LIMIT.minDelayMs);
+          const remaining = cookies.filter((c) => c !== cookie);
+          const spec = new RequestSpec("http://localhost:8080");
+          spec.setMethod(reqData.getMethod());
+          spec.setHost(reqData.getHost());
+          spec.setPort(reqData.getPort());
+          spec.setTls(reqData.getPort() === 443);
+          spec.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+          if (minimalBody) spec.setBody(minimalBody);
+          for (const h of minimalHeaders) {
+            if (h.toLowerCase() === "cookie") {
+              if (remaining.length) spec.setHeader(h, remaining.join("; "));
+            } else {
+              const vals = originalHeaders[h];
+              if (Array.isArray(vals)) vals.forEach((val) => spec.setHeader(h, val));
+              else spec.setHeader(h, vals);
             }
-            const trialResult2 = await sendRequestWithTimeout(sdk, trialSpecsH2);
-            if (trialResult2.response && await compareResponses(originalResp, trialResult2.response)) {
-              const remainingCookies = cookies.filter((c) => c !== cookie);
-              if (remainingCookies.length > 0) {
-                originalHeaders[cookieHeader] = remainingCookies;
-              } else {
-                minimalHeaders = minimalHeaders.filter((h) => h.toLowerCase() !== "cookie");
-              }
+          }
+          const result = await sendRequestWithTimeout(sdk, spec);
+          if (result.response && await compareResponses(originalResp, result.response)) {
+            cookies = remaining;
+            if (remaining.length) {
+              originalHeaders[headerKey] = [remaining.join("; ")];
+            } else {
+              minimalHeaders = minimalHeaders.filter((h) => h !== headerKey);
             }
           }
         }
+        continue;
       }
-    }
-    for (const headerKey of [...minimalHeaders]) {
-      await delay(RATE_LIMIT.minDelayMs);
-      const trialSpecsH = new RequestSpec("http://localhost:8080");
-      trialSpecsH.setMethod(reqData.getMethod());
-      trialSpecsH.setHost(reqData.getHost());
-      trialSpecsH.setPort(reqData.getPort());
-      trialSpecsH.setTls(reqData.getPort() === 443);
-      trialSpecsH.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
-      if (minimalBody) trialSpecsH.setBody(minimalBody);
+      const test = new RequestSpec("http://localhost:8080");
+      test.setMethod(reqData.getMethod());
+      test.setHost(reqData.getHost());
+      test.setPort(reqData.getPort());
+      test.setTls(reqData.getPort() === 443);
+      test.setPath(urlObj.pathname + (minimalQuery.toString() ? "?" + minimalQuery.toString() : ""));
+      if (minimalBody) test.setBody(minimalBody);
       for (const h of minimalHeaders.filter((h2) => h2 !== headerKey)) {
         const vals = originalHeaders[h];
-        if (Array.isArray(vals)) vals.forEach((val) => trialSpecsH.setHeader(h, val));
-        else trialSpecsH.setHeader(h, vals);
+        if (Array.isArray(vals)) vals.forEach((val) => test.setHeader(h, val));
+        else test.setHeader(h, vals);
       }
-      const trialResult = await sendRequestWithTimeout(sdk, trialSpecsH);
-      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+      const res = await sendRequestWithTimeout(sdk, test);
+      if (res.response && await compareResponses(originalResp, res.response)) {
         minimalHeaders = minimalHeaders.filter((h) => h !== headerKey);
       }
     }

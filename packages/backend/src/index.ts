@@ -3,14 +3,14 @@ import { SDK, DefineAPI } from "caido:plugin";
 
 // Rate limiting configuration
 const RATE_LIMIT = {
-  requestsPerSecond: 2,  // Maximum 2 requests per second
-  minDelayMs: 500,       // Minimum 500ms between requests
+  requestsPerSecond: 2,
+  minDelayMs: 500,
 };
 
 // Request configuration
 const REQUEST_CONFIG = {
-  timeoutMs: 30000,     // 30 second timeout for requests
-  maxRetries: 2,        // Maximum number of retries for failed requests
+  timeoutMs: 30000,
+  maxRetries: 2,
 };
 
 // Helper to delay execution
@@ -38,7 +38,7 @@ async function compareResponses(original: any, current: any): Promise<boolean> {
   if (original.getCode() !== current.getCode()) return false;
 
   const origHeaders = original.getHeaders() || {};
-  const currHeaders = current.getHeaders()  || {};
+  const currHeaders = current.getHeaders() || {};
   if (origHeaders['content-length'] !== currHeaders['content-length']) return false;
   if (origHeaders['content-type'] !== currHeaders['content-type']) return false;
 
@@ -75,42 +75,35 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
     // Fetch original request
     const reqWrapper = await sdk.requests.get(requestId);
     const reqData = reqWrapper?.request;
-    if (!reqData) {
-      return { _type: 'error', message: 'Request data not found' };
-    }
+    if (!reqData) return { _type: 'error', message: 'Request data not found' };
 
-    // Build base spec for baseline
+    // Build baseline spec
     const originalSpec = new RequestSpec('http://localhost:8080');
     originalSpec.setMethod(reqData.getMethod());
     originalSpec.setHost(reqData.getHost());
     originalSpec.setPort(reqData.getPort());
     const fullUrl = reqData.getUrl();
-    const pathAndQuery = fullUrl.substring(fullUrl.indexOf('/', 8));
-    originalSpec.setPath(pathAndQuery);
+    const urlObj = new URL(fullUrl);
+    originalSpec.setPath(urlObj.pathname + urlObj.search);
     originalSpec.setTls(reqData.getPort() === 443);
     const initBody = reqData.getBody();
     if (initBody) originalSpec.setBody(initBody);
+
     const originalHeaders = reqData.getHeaders() || {};
-    // Set all headers for baseline
     for (const [h, v] of Object.entries(originalHeaders)) {
       if (Array.isArray(v)) v.forEach(val => originalSpec.setHeader(h, val));
       else originalSpec.setHeader(h, v);
     }
 
-    // Send baseline to verify
+    // Send baseline
     await delay(RATE_LIMIT.minDelayMs);
     const originalResult = await sendRequestWithTimeout(sdk, originalSpec);
-    if (!originalResult.response) {
-      return { _type: 'error', message: 'Failed to get original response' };
-    }
+    if (!originalResult.response) return { _type: 'error', message: 'Failed to get original response' };
     const originalResp = originalResult.response;
     const origStatus = originalResp.getCode();
-    if (origStatus < 200 || origStatus >= 300) {
-      return { _type: 'error', message: `Original request failed with status ${origStatus}` };
-    }
+    if (origStatus < 200 || origStatus >= 300) return { _type: 'error', message: `Original request failed with status ${origStatus}` };
 
     // 1. Minimize query parameters
-    const urlObj = new URL(reqData.getUrl());
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
     for (const key of Array.from(urlObj.searchParams.keys())) {
       await delay(RATE_LIMIT.minDelayMs);
@@ -149,7 +142,6 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
         testSpec.setPort(reqData.getPort());
         testSpec.setTls(reqData.getPort() === 443);
         testSpec.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
-        // headers
         for (const [h, v] of Object.entries(originalHeaders)) {
           if (h.toLowerCase() === 'host') continue;
           if (Array.isArray(v)) v.forEach(val => testSpec.setHeader(h, val));
@@ -167,92 +159,82 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
 
     // 3. Minimize headers (skip Host)
     let minimalHeaders = Object.keys(originalHeaders).filter(h => h.toLowerCase() !== 'host');
-
-    // 3.1 First try removing all cookies
-    const cookieHeader = minimalHeaders.find(h => h.toLowerCase() === 'cookie');
-    if (cookieHeader) {
+    for (const headerKey of [...minimalHeaders]) {
       await delay(RATE_LIMIT.minDelayMs);
-      const trialSpecsH = new RequestSpec('http://localhost:8080');
-      trialSpecsH.setMethod(reqData.getMethod());
-      trialSpecsH.setHost(reqData.getHost());
-      trialSpecsH.setPort(reqData.getPort());
-      trialSpecsH.setTls(reqData.getPort() === 443);
-      trialSpecsH.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
-      if (minimalBody) trialSpecsH.setBody(minimalBody);
-      
-      // Set all headers except cookies
-      for (const h of minimalHeaders.filter(h => h.toLowerCase() !== 'cookie')) {
-        const vals = originalHeaders[h];
-        if (Array.isArray(vals)) vals.forEach(val => trialSpecsH.setHeader(h, val));
-        else if (vals) trialSpecsH.setHeader(h, vals);
-      }
 
-      const trialResult = await sendRequestWithTimeout(sdk, trialSpecsH);
-      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
-        // If removing all cookies works, remove the cookie header
-        minimalHeaders = minimalHeaders.filter(h => h.toLowerCase() !== 'cookie');
-      } else {
-        // If removing all cookies fails, try removing them one by one
-        const cookieValue = originalHeaders[cookieHeader];
-        if (cookieValue) {
-          const cookies = Array.isArray(cookieValue) ? cookieValue : [cookieValue];
-          for (const cookie of cookies) {
-            await delay(RATE_LIMIT.minDelayMs);
-            const trialSpecsH = new RequestSpec('http://localhost:8080');
-            trialSpecsH.setMethod(reqData.getMethod());
-            trialSpecsH.setHost(reqData.getHost());
-            trialSpecsH.setPort(reqData.getPort());
-            trialSpecsH.setTls(reqData.getPort() === 443);
-            trialSpecsH.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
-            if (minimalBody) trialSpecsH.setBody(minimalBody);
+      // Special-case Cookie header
+      if (headerKey.toLowerCase() === 'cookie') {
+        const raw = originalHeaders[headerKey];
+        const cookieStr = Array.isArray(raw) ? raw.join('; ') : (raw || '');
+        let cookies = cookieStr.split(';').map(c => c.trim()).filter(c => c);
 
-            // Set all headers including cookies except the current one
-            for (const h of minimalHeaders) {
-              if (h.toLowerCase() === 'cookie') {
-                const remainingCookies = cookies.filter(c => c !== cookie);
-                if (remainingCookies.length > 0) {
-                  trialSpecsH.setHeader(h, remainingCookies.join('; '));
-                }
-              } else {
-                const vals = originalHeaders[h];
-                if (Array.isArray(vals)) vals.forEach(val => trialSpecsH.setHeader(h, val));
-                else if (vals) trialSpecsH.setHeader(h, vals);
-              }
+        // Try removing entire Cookie header
+        const removeAll = new RequestSpec('http://localhost:8080');
+        removeAll.setMethod(reqData.getMethod());
+        removeAll.setHost(reqData.getHost());
+        removeAll.setPort(reqData.getPort());
+        removeAll.setTls(reqData.getPort() === 443);
+        removeAll.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
+        if (minimalBody) removeAll.setBody(minimalBody);
+        for (const h of minimalHeaders.filter(h => h.toLowerCase() !== 'cookie')) {
+          const vals = originalHeaders[h];
+          if (Array.isArray(vals)) vals.forEach(val => removeAll.setHeader(h, val));
+          else removeAll.setHeader(h, vals as string);
+        }
+        const allResult = await sendRequestWithTimeout(sdk, removeAll);
+        if (allResult.response && await compareResponses(originalResp, allResult.response)) {
+          minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
+          continue;
+        }
+
+        // Otherwise try each cookie
+        for (const cookie of [...cookies]) {
+          await delay(RATE_LIMIT.minDelayMs);
+          const remaining = cookies.filter(c => c !== cookie);
+          const spec = new RequestSpec('http://localhost:8080');
+          spec.setMethod(reqData.getMethod());
+          spec.setHost(reqData.getHost());
+          spec.setPort(reqData.getPort());
+          spec.setTls(reqData.getPort() === 443);
+          spec.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
+          if (minimalBody) spec.setBody(minimalBody);
+          for (const h of minimalHeaders) {
+            if (h.toLowerCase() === 'cookie') {
+              if (remaining.length) spec.setHeader(h, remaining.join('; '));
+            } else {
+              const vals = originalHeaders[h];
+              if (Array.isArray(vals)) vals.forEach(val => spec.setHeader(h, val));
+              else spec.setHeader(h, vals as string);
             }
-
-            const trialResult = await sendRequestWithTimeout(sdk, trialSpecsH);
-            if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
-              // If removing this cookie works, update the cookie header
-              const remainingCookies = cookies.filter(c => c !== cookie);
-              if (remainingCookies.length > 0) {
-                originalHeaders[cookieHeader] = remainingCookies;
-              } else {
-                minimalHeaders = minimalHeaders.filter(h => h.toLowerCase() !== 'cookie');
-              }
+          }
+          const result = await sendRequestWithTimeout(sdk, spec);
+          if (result.response && await compareResponses(originalResp, result.response)) {
+            cookies = remaining;
+            if (remaining.length) {
+              originalHeaders[headerKey] = [remaining.join('; ')];
+            } else {
+              minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
             }
           }
         }
+        continue;
       }
-    }
 
-    // 3.2 Continue with remaining headers
-    for (const headerKey of [...minimalHeaders]) {
-      await delay(RATE_LIMIT.minDelayMs);
-      const trialSpecsH = new RequestSpec('http://localhost:8080');
-      trialSpecsH.setMethod(reqData.getMethod());
-      trialSpecsH.setHost(reqData.getHost());
-      trialSpecsH.setPort(reqData.getPort());
-      trialSpecsH.setTls(reqData.getPort() === 443);
-      trialSpecsH.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
-      if (minimalBody) trialSpecsH.setBody(minimalBody);
-      // set only minimalHeaders minus headerKey
+      // Generic header removal
+      const test = new RequestSpec('http://localhost:8080');
+      test.setMethod(reqData.getMethod());
+      test.setHost(reqData.getHost());
+      test.setPort(reqData.getPort());
+      test.setTls(reqData.getPort() === 443);
+      test.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
+      if (minimalBody) test.setBody(minimalBody);
       for (const h of minimalHeaders.filter(h => h !== headerKey)) {
         const vals = originalHeaders[h];
-        if (Array.isArray(vals)) vals.forEach(val => trialSpecsH.setHeader(h, val));
-        else trialSpecsH.setHeader(h, vals);
+        if (Array.isArray(vals)) vals.forEach(val => test.setHeader(h, val));
+        else test.setHeader(h, vals as string);
       }
-      const trialResult = await sendRequestWithTimeout(sdk, trialSpecsH);
-      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+      const res = await sendRequestWithTimeout(sdk, test);
+      if (res.response && await compareResponses(originalResp, res.response)) {
         minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
       }
     }
@@ -268,7 +250,7 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
     for (const h of minimalHeaders) {
       const vals = originalHeaders[h];
       if (Array.isArray(vals)) vals.forEach(val => finalSpec.setHeader(h, val));
-      else finalSpec.setHeader(h, vals);
+      else finalSpec.setHeader(h, vals as string);
     }
 
     await delay(RATE_LIMIT.minDelayMs);
@@ -282,7 +264,7 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string): Promise<Minimi
       _type: session ? 'success' : 'warning',
       message: session ? 'Request minimized successfully' : 'Minimized but could not open replay session',
       statusCode: finalResult.response?.getCode(),
-      requestId: session?.getId()
+      requestId: session?.getId(),
     };
   } catch (error) {
     return { _type: 'error', message: error instanceof Error ? error.message : 'Unknown error' };
