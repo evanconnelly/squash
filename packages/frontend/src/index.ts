@@ -1,9 +1,55 @@
-import type { Caido } from "@caido/sdk-frontend";
 import type { API } from "../../backend/src";
+import { SDKPlugin, useSDK } from "@/plugins/sdk";
+import { createApp } from "vue";
+import App from "./views/App.vue";
+import { type FrontendSDK } from "./types";
+import { Classic } from "@caido/primevue";
+import PrimeVue from "primevue/config";
 
-export type CaidoSDK = Caido<API>;
 
-export function init(sdk: CaidoSDK) {
+const DEFAULT_CONFIG = {
+  rateLimit: {
+    minDelayMs: 500,
+  },
+  requestConfig: {
+    timeoutMs: 30000,
+    maxRetries: 2,
+  },
+  autoRemovedHeaders: ['sec-*'],
+  openTabAfterMinimize: true
+}
+
+export async function init(sdk: FrontendSDK) {
+
+  const app = createApp(App);
+  app.use(SDKPlugin, sdk);
+  app.use(PrimeVue, {
+    unstyled: true,
+    pt: Classic,
+  });
+  const root = document.createElement("div");
+  Object.assign(root.style, {
+    height: "100%",
+    width: "100%",
+  });
+
+  root.id = `plugin--squash`;
+
+  app.mount(root);
+
+  sdk.navigation.addPage("/squash", {
+    body: root,
+  });
+
+  sdk.sidebar.registerItem("Squash", "/squash", {
+    icon: "fas fa-compress",
+  });
+
+  let storage = await sdk.storage.get();
+  if (!storage) {
+    await sdk.storage.set(DEFAULT_CONFIG);
+  }
+
   /* --- 1. Register the command that triggers minimization --- */
   sdk.commands.register("squash.minimize", {
     name: "Squash – Minimize Request",
@@ -51,7 +97,9 @@ export function init(sdk: CaidoSDK) {
 
       sdk.window.showToast("Squashing…", { variant: "info", duration: 1500 });
       try {
-        const result = await sdk.backend.minimizeRequest(requestId);
+        let config = await sdk.storage.get();
+        console.log(`Config: ${JSON.stringify(config)}`);
+        const result = await sdk.backend.minimizeRequest(requestId, config);
         if (!result) {
           sdk.window.showToast("No response from backend", { variant: "error" });
           return;
@@ -59,6 +107,9 @@ export function init(sdk: CaidoSDK) {
 
         if (result._type === "success" && result.requestId) {
           sdk.window.showToast("Request minimized successfully!", { variant: "success" });
+          if (config?.openTabAfterMinimize) {
+            sdk.replay.openTab(result.requestId);
+          }
           // The minimized request should automatically appear in replay
         } else {
           sdk.window.showToast(result.message || "Unknown error occurred", { variant: "warning" });
