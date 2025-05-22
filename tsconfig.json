@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "esnext",
     "module": "esnext",
-    "lib": ["ESNext"],
+    "lib": ["ESNext", "DOM"],
 
     "jsx": "preserve",
     "noImplicitAny": true,

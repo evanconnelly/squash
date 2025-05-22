@@ -4,15 +4,18 @@ import tailwindcss from "tailwindcss";
 // @ts-expect-error no declared types at this time
 import tailwindPrimeui from "tailwindcss-primeui";
 import tailwindCaido from "@caido/tailwindcss";
-import path from "path";
+import { fileURLToPath } from 'node:url';
+import path from "node:path";
 import prefixwrap from "postcss-prefixwrap";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const id = "squash";
 export default defineConfig({
   id,
   name: "Squash",
   description: "Iteratively removes non-essential material from an HTTP request and opens the minimal form in Replay.",
-  version: "0.1.1",
+  version: "0.1.2",
   author: {
     name: "Evan Connelly",
     email: "evan@evanconnelly.com",

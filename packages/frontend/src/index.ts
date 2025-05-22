@@ -100,21 +100,33 @@ export async function init(sdk: FrontendSDK) {
         let config = await sdk.storage.get();
         console.log(`Config: ${JSON.stringify(config)}`);
         const result = await sdk.backend.minimizeRequest(requestId, config);
-        if (!result) {
-          sdk.window.showToast("No response from backend", { variant: "error" });
+        
+        console.log('Minimization result:', result);
+
+        if (result instanceof Error) {
+          console.error('Minimization error:', result);
+          sdk.window.showToast(`Error: ${result.message}`, { variant: "error" });
           return;
         }
 
         if (result._type === "success" && result.requestId) {
           sdk.window.showToast("Request minimized successfully!", { variant: "success" });
-          if (config?.openTabAfterMinimize) {
-            sdk.replay.openTab(result.requestId);
+          try {
+            if (config && typeof config === 'object' && 'openTabAfterMinimize' in config && config.openTabAfterMinimize) {
+              await sdk.replay.openTab(result.requestId);
+            }
+          } catch (tabError) {
+            console.error('Failed to open replay tab:', tabError);
+            sdk.window.showToast("Request minimized but failed to open replay tab", { variant: "warning" });
           }
-          // The minimized request should automatically appear in replay
+        } else if (result._type === "warning") {
+          sdk.window.showToast(result.message || "Request minimized with warnings", { variant: "warning" });
         } else {
-          sdk.window.showToast(result.message || "Unknown error occurred", { variant: "warning" });
+          console.error('Unexpected result type:', result);
+          sdk.window.showToast(result.message || "Unknown error occurred", { variant: "error" });
         }
       } catch (error: unknown) {
+        console.error('Minimization error:', error);
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
         sdk.window.showToast(`Error: ${errorMessage}`, { variant: "error" });
       }

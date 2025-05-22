@@ -1,5 +1,6 @@
 import { RequestSpec } from "caido:utils";
 import { SDK, DefineAPI } from "caido:plugin";
+import { Result, err, ok } from 'neverthrow';
 
 // Default configuration values
 const DEFAULT_CONFIG = {
@@ -16,8 +17,29 @@ const DEFAULT_CONFIG = {
 // Helper to delay execution
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Helper to normalize header names and values
+function normalizeHeader(headerName: string, headerValue: string | string[] | undefined): { name: string, value: string | string[] } {
+  const normalizedName = headerName.toLowerCase().trim();
+  if (!headerValue) {
+    return {
+      name: normalizedName,
+      value: ''
+    };
+  }
+  if (Array.isArray(headerValue)) {
+    return {
+      name: normalizedName,
+      value: headerValue.map(v => v.trim())
+    };
+  }
+  return {
+    name: normalizedName,
+    value: headerValue.trim()
+  };
+}
+
 // Helper to check if a header should be auto-removed
-function shouldRemoveHeader(sdk: SDK<any>, headerName: string, patterns: string[]): boolean {
+function shouldRemoveHeader(sdk: SDK<API>, headerName: string, patterns: string[]): boolean {
   sdk.console.log(`Checking header ${headerName} against patterns ${patterns}`);
   return patterns.some(pattern => {
     try {
@@ -30,14 +52,14 @@ function shouldRemoveHeader(sdk: SDK<any>, headerName: string, patterns: string[
 }
 
 // Wrapper to send requests with timeout and retries
-async function sendRequestWithTimeout(sdk: SDK<any>, spec: RequestSpec, config: any = DEFAULT_CONFIG, retryCount = 0): Promise<any> {
-
+async function sendRequestWithTimeout(sdk: SDK<API>, spec: RequestSpec, config: any = DEFAULT_CONFIG, retryCount = 0): Promise<any> {
   try {
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error(`Request timed out after ${config.requestConfig.timeoutMs}ms`)), config.requestConfig.timeoutMs);
     });
     const requestPromise = sdk.requests.send(spec);
-    return await Promise.race([requestPromise, timeoutPromise]);
+    const result = await Promise.race([requestPromise, timeoutPromise]);
+    return result;
   } catch (error) {
     if (retryCount < config.requestConfig.maxRetries) {
       await delay(config.rateLimit.minDelayMs);
@@ -58,8 +80,8 @@ async function compareResponses(original: any, current: any): Promise<boolean> {
 
   const origBody = original.getBody();
   const currBody = current.getBody();
-  if (origBody?.length !== currBody?.length) return false;
-
+  if (origBody?.toString().length !== currBody?.toString().length) return false;
+  
   const contentType = origHeaders['content-type'];
   if (contentType?.includes('application/json')) {
     try {
@@ -84,12 +106,12 @@ interface MinimizeResult {
 }
 
 // Main minimization routine
-async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = DEFAULT_CONFIG): Promise<MinimizeResult> {
+async function minimizeRequest(sdk: SDK<API>, requestId: string, config: any = DEFAULT_CONFIG): Promise<Result<MinimizeResult, Error>> {
   try {
     // Fetch original request
     const reqWrapper = await sdk.requests.get(requestId);
     const reqData = reqWrapper?.request;
-    if (!reqData) return { _type: 'error', message: 'Request data not found' };
+    if (!reqData) return err(new Error('Request data not found'));
 
     // Build baseline spec
     const originalSpec = new RequestSpec('http://localhost:8080');
@@ -105,14 +127,17 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
 
     const originalHeaders = reqData.getHeaders() || {};
     for (const [h, v] of Object.entries(originalHeaders)) {
-      if (Array.isArray(v)) v.forEach(val => originalSpec.setHeader(h, val));
-      else originalSpec.setHeader(h, v);
+      const { name, value } = normalizeHeader(h, v);
+      if (Array.isArray(value)) value.forEach(val => originalSpec.setHeader(name, val));
+      else originalSpec.setHeader(name, value);
     }
 
     // Send baseline
     const originalResult = await sendRequestWithTimeout(sdk, originalSpec, config);
+    if (!originalResult) return err(new Error('Failed to get original response'));
+    
     const originalResp = originalResult.response;
-    if (!originalResp) return { _type: 'error', message: 'Failed to get original response' };
+    if (!originalResp) return err(new Error('Failed to get original response'));
 
     // 1. Minimize query parameters
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
@@ -128,8 +153,9 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
       if (initBody) testSpec.setBody(initBody);
       for (const [h, v] of Object.entries(originalHeaders)) {
         if (h.toLowerCase() === 'host') continue;
-        if (Array.isArray(v)) v.forEach(val => testSpec.setHeader(h, val));
-        else testSpec.setHeader(h, v);
+        const { name, value } = normalizeHeader(h, v);
+        if (Array.isArray(value)) value.forEach(val => testSpec.setHeader(name, val));
+        else testSpec.setHeader(name, value);
       }
       await delay(config.rateLimit.minDelayMs);
       const trialResult = await sendRequestWithTimeout(sdk, testSpec, config);
@@ -154,8 +180,9 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
         testSpec.setPath(urlObj.pathname + (minimalQuery.toString() ? '?' + minimalQuery.toString() : ''));
         for (const [h, v] of Object.entries(originalHeaders)) {
           if (h.toLowerCase() === 'host') continue;
-          if (Array.isArray(v)) v.forEach(val => testSpec.setHeader(h, val));
-          else testSpec.setHeader(h, v);
+          const { name, value } = normalizeHeader(h, v);
+          if (Array.isArray(value)) value.forEach(val => testSpec.setHeader(name, val));
+          else testSpec.setHeader(name, value);
         }
         const bodyStr = trialBody.toString();
         testSpec.setBody(bodyStr);
@@ -163,7 +190,9 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
         const trialResult = await sendRequestWithTimeout(sdk, testSpec, config);
         if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
           bodyParams = trialBody;
-          minimalBody = Buffer.from(bodyStr);
+          const tempSpec = new RequestSpec('http://localhost:8080');
+          tempSpec.setBody(bodyStr);
+          minimalBody = tempSpec.getBody();
         }
       }
     }
@@ -171,9 +200,8 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
     // 3. Minimize headers (skip Host)
     let minimalHeaders = Object.keys(originalHeaders).filter(h => h.toLowerCase() !== 'host');
     for (const headerKey of [...minimalHeaders]) {
-
       // Skip if header matches auto-removed patterns
-      if (shouldRemoveHeader(sdk,headerKey, config?.autoRemovedHeaders ?? DEFAULT_CONFIG.autoRemovedHeaders)) {
+      if (shouldRemoveHeader(sdk, headerKey, config?.autoRemovedHeaders ?? DEFAULT_CONFIG.autoRemovedHeaders)) {
         minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
         sdk.console.log(`Removed header ${headerKey}`);
         continue;
@@ -195,8 +223,9 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
         if (minimalBody) removeAll.setBody(minimalBody);
         for (const h of minimalHeaders.filter(h => h.toLowerCase() !== 'cookie')) {
           const vals = originalHeaders[h];
-          if (Array.isArray(vals)) vals.forEach(val => removeAll.setHeader(h, val));
-          else removeAll.setHeader(h, vals as string);
+          const { name, value } = normalizeHeader(h, vals);
+          if (Array.isArray(value)) value.forEach(val => removeAll.setHeader(name, val));
+          else if (value !== undefined) removeAll.setHeader(name, String(value));
         }
         const allResult = await sendRequestWithTimeout(sdk, removeAll, config);
         if (allResult.response && await compareResponses(originalResp, allResult.response)) {
@@ -219,8 +248,9 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
               if (remaining.length) spec.setHeader(h, remaining.join('; '));
             } else {
               const vals = originalHeaders[h];
-              if (Array.isArray(vals)) vals.forEach(val => spec.setHeader(h, val));
-              else spec.setHeader(h, vals as string);
+              const { name, value } = normalizeHeader(h, vals);
+              if (Array.isArray(value)) value.forEach(val => spec.setHeader(name, val));
+              else if (value !== undefined) spec.setHeader(name, String(value));
             }
           }
           await delay(config.rateLimit.minDelayMs);
@@ -247,8 +277,9 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
       if (minimalBody) test.setBody(minimalBody);
       for (const h of minimalHeaders.filter(h => h !== headerKey)) {
         const vals = originalHeaders[h];
-        if (Array.isArray(vals)) vals.forEach(val => test.setHeader(h, val));
-        else test.setHeader(h, vals as string);
+        const { name, value } = normalizeHeader(h, vals);
+        if (Array.isArray(value)) value.forEach(val => test.setHeader(name, val));
+        else if (value !== undefined) test.setHeader(name, String(value));
       }
       await delay(config.rateLimit.minDelayMs);
       const res = await sendRequestWithTimeout(sdk, test, config);
@@ -267,30 +298,48 @@ async function minimizeRequest(sdk: SDK<any>, requestId: string, config: any = D
     if (minimalBody) finalSpec.setBody(minimalBody);
     for (const h of minimalHeaders) {
       const vals = originalHeaders[h];
-      if (Array.isArray(vals)) vals.forEach(val => finalSpec.setHeader(h, val));
-      else finalSpec.setHeader(h, vals as string);
+      const { name, value } = normalizeHeader(h, vals);
+      if (Array.isArray(value)) value.forEach(val => finalSpec.setHeader(name, val));
+      else if (value !== undefined) finalSpec.setHeader(name, String(value));
     }
 
     await delay(config.rateLimit.minDelayMs);
     const finalResult = await sendRequestWithTimeout(sdk, finalSpec, config);
-    const session = finalResult.response
-      ? await sdk.replay.createSession(finalSpec)
-      : null;
+    if (!finalResult) return err(new Error('Failed to get final response'));
 
-    if (session) sdk.console.log(`REQ ${session.getId()}:${reqData.getHost()}${urlObj.pathname} => ${finalResult.response.getCode()}`);
-    return {
+    let session = null;
+    try {
+      if (finalResult.response) {
+        session = await sdk.replay.createSession(finalSpec);
+        sdk.console.log(`REQ ${session.getId()}:${reqData.getHost()}${urlObj.pathname} => ${finalResult.response.getCode()}`);
+      }
+    } catch (error) {
+      sdk.console.error('Failed to create replay session:', error);
+      return err(new Error(`Failed to create replay session: ${error instanceof Error ? error.message : 'Unknown error'}`));
+    }
+
+    return ok({
       _type: session ? 'success' : 'warning',
       message: session ? 'Request minimized successfully' : 'Minimized but could not open replay session',
       statusCode: finalResult.response?.getCode(),
       requestId: session?.getId(),
-    };
+    });
   } catch (error) {
-    return { _type: 'error', message: error instanceof Error ? error.message : 'Unknown error' };
+    sdk.console.error('Minimization error:', error);
+    return err(error instanceof Error ? error : new Error('Unknown error'));
   }
 }
 
-export type API = DefineAPI<{ minimizeRequest: typeof minimizeRequest }>;
+export type API = DefineAPI<{
+  minimizeRequest: (sdk: SDK<API>, requestId: string, config: any) => Promise<MinimizeResult | Error>
+}>;
 
 export function init(sdk: SDK<API>) {
-  sdk.api.register('minimizeRequest', minimizeRequest);
+  sdk.api.register('minimizeRequest', async (sdk: SDK<API>, requestId: string, config: any) => {
+    const result = await minimizeRequest(sdk, requestId, config);
+    if (result.isErr()) {
+      throw result.error;
+    }
+    return result.value;
+  });
 }
