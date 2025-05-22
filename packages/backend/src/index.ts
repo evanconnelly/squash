@@ -78,6 +78,14 @@ async function compareResponses(original: any, current: any): Promise<boolean> {
   if (origHeaders['content-length'] !== currHeaders['content-length']) return false;
   if (origHeaders['content-type'] !== currHeaders['content-type']) return false;
 
+  // Check Location header if present
+  const origLocation = original.getHeader('location');
+  const currLocation = current.getHeader('location');
+  if (origLocation?.length > 0 || currLocation?.length > 0) {
+    if (!origLocation?.length || !currLocation?.length) return false;
+    if (origLocation[0] !== currLocation[0]) return false;
+  }
+
   const origBody = original.getBody();
   const currBody = current.getBody();
   if (origBody?.toString().length !== currBody?.toString().length) return false;
