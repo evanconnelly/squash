@@ -1,5 +1,4 @@
-import type { API } from "../../backend/src";
-import { SDKPlugin, useSDK } from "@/plugins/sdk";
+import { SDKPlugin } from "@/plugins/sdk";
 import { createApp } from "vue";
 import App from "./views/App.vue";
 import { type FrontendSDK } from "./types";
@@ -9,14 +8,15 @@ import PrimeVue from "primevue/config";
 
 const DEFAULT_CONFIG = {
   rateLimit: {
-    minDelayMs: 500,
+    minDelayMs: 100,
   },
   requestConfig: {
     timeoutMs: 30000,
     maxRetries: 2,
   },
   autoRemovedHeaders: ['sec-*'],
-  openTabAfterMinimize: true
+  openTabAfterMinimize: true,
+  saveRequests: false
 }
 
 export async function init(sdk: FrontendSDK) {

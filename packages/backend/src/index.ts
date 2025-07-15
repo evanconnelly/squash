@@ -5,13 +5,14 @@ import { Result, err, ok } from 'neverthrow';
 // Default configuration values
 const DEFAULT_CONFIG = {
   rateLimit: {
-    minDelayMs: 500,
+    minDelayMs: 100,
   },
   requestConfig: {
     timeoutMs: 30000,
     maxRetries: 2,
   },
-  autoRemovedHeaders: ['sec-*']
+  autoRemovedHeaders: ['sec-*'],
+  saveRequests: false
 };
 
 // Helper to delay execution
@@ -57,7 +58,7 @@ async function sendRequestWithTimeout(sdk: SDK<API>, spec: RequestSpec, config: 
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error(`Request timed out after ${config.requestConfig.timeoutMs}ms`)), config.requestConfig.timeoutMs);
     });
-    const requestPromise = sdk.requests.send(spec);
+    const requestPromise = (sdk.requests.send as any)(spec, { save: config.saveRequests });
     const result = await Promise.race([requestPromise, timeoutPromise]);
     return result;
   } catch (error) {
@@ -149,7 +150,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: any = D
 
     // 1. Minimize query parameters
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
-    for (const key of Array.from(urlObj.searchParams.keys())) {
+    for (const key of getSearchParamKeys(urlObj.searchParams)) {
       const trialQuery = new URLSearchParams(minimalQuery);
       trialQuery.delete(key);
       const testSpec = new RequestSpec('http://localhost:8080');
@@ -177,7 +178,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: any = D
     const contentType = originalHeaders['content-type'] || '';
     if (contentType.includes('application/x-www-form-urlencoded') && initBody) {
       let bodyParams = new URLSearchParams(initBody.toString());
-      for (const key of Array.from(bodyParams.keys())) {
+      for (const key of getSearchParamKeys(bodyParams)) {
         const trialBody = new URLSearchParams(bodyParams);
         trialBody.delete(key);
         const testSpec = new RequestSpec('http://localhost:8080');
@@ -190,7 +191,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: any = D
           if (h.toLowerCase() === 'host') continue;
           const { name, value } = normalizeHeader(h, v);
           if (Array.isArray(value)) value.forEach(val => testSpec.setHeader(name, val));
-          else testSpec.setHeader(name, value);
+          else if (value !== undefined) testSpec.setHeader(name, String(value));
         }
         const bodyStr = trialBody.toString();
         testSpec.setBody(bodyStr);
@@ -350,4 +351,13 @@ export function init(sdk: SDK<API>) {
     }
     return result.value;
   });
+}
+
+// Helper to get keys from URLSearchParams in a TS-compatible way
+function getSearchParamKeys(params: URLSearchParams): string[] {
+  const keys: string[] = [];
+  params.forEach((_, key) => {
+    if (!keys.includes(key)) keys.push(key);
+  });
+  return keys;
 }

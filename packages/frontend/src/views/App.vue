@@ -11,10 +11,11 @@ const sdk = useSDK();
 
 // Configuration state
 const rateLimitRequestPerSecond = ref(2);
-const rateLimitMinDelayMs = ref(500);
+const rateLimitMinDelayMs = ref(100);
 const requestConfigTimeout = ref(30000);
 const requestConfigMaxRetries = ref(2);
 const openTabAfterMinimize = ref(true);
+const saveRequests = ref(false);
 
 // Auto-removed headers state
 const autoRemovedHeaders = ref([
@@ -45,13 +46,15 @@ const handleKeyPress = (event: KeyboardEvent) => {
 // Load configuration from storage
 onMounted(async () => {
   const storage = await sdk.storage.get();
-  if (storage) {
-    rateLimitRequestPerSecond.value = storage.rateLimit?.requestsPerSecond ?? 2;
-    rateLimitMinDelayMs.value = storage.rateLimit?.minDelayMs ?? 500;
-    requestConfigTimeout.value = storage.requestConfig?.timeoutMs ?? 30000;
-    requestConfigMaxRetries.value = storage.requestConfig?.maxRetries ?? 2;
-    autoRemovedHeaders.value = storage.autoRemovedHeaders ?? ['sec-*'];
-    openTabAfterMinimize.value = storage.openTabAfterMinimize ?? true;
+  if (storage && typeof storage === 'object') {
+    const config = storage as any;
+    rateLimitRequestPerSecond.value = config.rateLimit?.requestsPerSecond ?? 2;
+    rateLimitMinDelayMs.value = config.rateLimit?.minDelayMs ?? 100;
+    requestConfigTimeout.value = config.requestConfig?.timeoutMs ?? 30000;
+    requestConfigMaxRetries.value = config.requestConfig?.maxRetries ?? 2;
+    autoRemovedHeaders.value = config.autoRemovedHeaders ?? ['sec-*'];
+    openTabAfterMinimize.value = config.openTabAfterMinimize ?? true;
+    saveRequests.value = config.saveRequests ?? false;
   }
 });
 
@@ -67,7 +70,8 @@ const saveConfig = async () => {
       maxRetries: requestConfigMaxRetries.value,
     },
     autoRemovedHeaders: autoRemovedHeaders.value,
-    openTabAfterMinimize: openTabAfterMinimize.value
+    openTabAfterMinimize: openTabAfterMinimize.value,
+    saveRequests: saveRequests.value
   });
   sdk.window.showToast("Configuration saved successfully", { variant: "success" });
 };
@@ -100,6 +104,14 @@ const saveConfig = async () => {
             <p class="text-sm text-gray-600">Automatically open the minimized request in a new tab</p>
             <div class="flex items-center">
               <input type="checkbox" v-model="openTabAfterMinimize" class="mr-2" />
+              <span>Enabled</span>
+            </div>
+          </div>
+          <div class="flex flex-col gap-2">
+            <label>Save requests to history</label>
+            <p class="text-sm text-gray-600">Save test requests to HTTP history (may pollute search)</p>
+            <div class="flex items-center">
+              <input type="checkbox" v-model="saveRequests" class="mr-2" />
               <span>Enabled</span>
             </div>
           </div>
