@@ -15,6 +15,7 @@ const DEFAULT_CONFIG = {
     maxRetries: 2,
   },
   autoRemovedHeaders: ['sec-*'],
+  doNotRemoveHeaders: [],
   openTabAfterMinimize: true,
   saveRequests: false
 }

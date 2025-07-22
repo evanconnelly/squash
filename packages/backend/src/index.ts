@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
     maxRetries: 2,
   },
   autoRemovedHeaders: ['sec-*'],
+  doNotRemoveHeaders: [],
   saveRequests: false
 };
 
@@ -209,6 +210,11 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: any = D
     // 3. Minimize headers (skip Host)
     let minimalHeaders = Object.keys(originalHeaders).filter(h => h.toLowerCase() !== 'host');
     for (const headerKey of [...minimalHeaders]) {
+      // Skip if header matches do-not-remove patterns
+      if (shouldRemoveHeader(sdk, headerKey, config?.doNotRemoveHeaders ?? DEFAULT_CONFIG.doNotRemoveHeaders)) {
+        sdk.console.log(`Skipping header ${headerKey} due to doNotRemoveHeaders`);
+        continue;
+      }
       // Skip if header matches auto-removed patterns
       if (shouldRemoveHeader(sdk, headerKey, config?.autoRemovedHeaders ?? DEFAULT_CONFIG.autoRemovedHeaders)) {
         minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
