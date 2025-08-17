@@ -108,6 +108,35 @@ async function compareResponses(original: any, current: any): Promise<boolean> {
   return true;
 }
 
+// Type definitions for JSON values
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonObject = { [key: string]: JsonValue };
+
+// Type for request data from Caido SDK
+interface RequestData {
+  getMethod(): string;
+  getHost(): string;
+  getPort(): number;
+  getUrl(): string;
+  getBody(): unknown;
+  getHeaders(): Record<string, string | string[] | undefined> | undefined;
+}
+
+// Type for configuration
+interface MinimizeConfig {
+  rateLimit: {
+    minDelayMs: number;
+  };
+  requestConfig: {
+    timeoutMs: number;
+    maxRetries: number;
+  };
+  autoRemovedHeaders: string[];
+  doNotRemoveHeaders: string[];
+  saveRequests: boolean;
+}
+
 interface MinimizeResult {
   _type: string;
   message: string;
@@ -115,8 +144,221 @@ interface MinimizeResult {
   requestId?: string;
 }
 
+// Helper to get keys from URLSearchParams
+function getSearchParamKeys(params: URLSearchParams): string[] {
+  const keys: string[] = [];
+  params.forEach((_, key) => {
+    if (!keys.includes(key)) keys.push(key);
+  });
+  return keys;
+}
+
+// --- helpers for recursive JSON minimization ---
+
+function isPlainObject(v: unknown): v is JsonObject {
+  return Object.prototype.toString.call(v) === '[object Object]';
+}
+
+function stableStringify(obj: JsonValue): string {
+  // Deterministic JSON for better invariant comparisons
+  const seen = new WeakSet();
+  const sorter = (k: string, v: JsonValue): JsonValue | undefined => {
+    if (isPlainObject(v)) {
+      if (seen.has(v)) return undefined;
+      seen.add(v);
+      const o: JsonObject = {};
+      for (const key of Object.keys(v).sort()) {
+        const val = v[key];
+        if (val !== undefined) o[key] = val;
+      }
+      return o;
+    }
+    return v;
+  };
+  return JSON.stringify(obj, sorter, 2);
+}
+
+function isJsonString(str: string): boolean {
+  try {
+    JSON.parse(str);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function checkJsonCandidate(
+  sdk: SDK<API>,
+  candidateObj: JsonValue,
+  originalResp: unknown,
+  reqData: RequestData,
+  minimalQuery: URLSearchParams,
+  minimalHeaderKeys: string[],
+  originalHeaders: Record<string, string | string[] | undefined>,
+  urlObj: URL,
+  config: MinimizeConfig
+): Promise<boolean> {
+  const spec = new RequestSpec('http://localhost:8080');
+  spec.setMethod(reqData.getMethod());
+  spec.setHost(reqData.getHost());
+  spec.setPort(reqData.getPort());
+  spec.setTls(reqData.getPort() === 443);
+  spec.setPath(urlObj.pathname + (minimalQuery.toString() ? `?${minimalQuery.toString()}` : ''));
+
+  // propagate headers, ensure content-type is JSON
+  let hasContentType = false;
+  for (const h of minimalHeaderKeys) {
+    const vals = originalHeaders[h];
+    const { name, value } = normalizeHeader(h, vals);
+    if (name === 'content-type') hasContentType = true;
+    if (Array.isArray(value)) value.forEach(v => spec.setHeader(name, v));
+    else if (value !== undefined) spec.setHeader(name, String(value));
+  }
+  if (!hasContentType) spec.setHeader('content-type', 'application/json');
+
+  spec.setBody(stableStringify(candidateObj));
+
+  await delay(config.rateLimit.minDelayMs);
+  const res = await sendRequestWithTimeout(sdk, spec, config);
+  return !!res.response && await compareResponses(originalResp, res.response);
+}
+
+// Recursively minimize JSON
+async function deltaMinimize(
+  node: JsonValue,
+  assembleParent: (children: Array<[string | number, JsonValue]>) => JsonValue,
+  children: Array<[string | number, JsonValue]>,
+  check: (candidate: JsonValue) => Promise<boolean>
+): Promise<JsonValue> {
+  // Phase 1 — elimination pass
+  const survivors: Array<[string | number, JsonValue]> = [];
+  const work = [...children]; // LIFO like your Python version
+
+  while (work.length) {
+    const cur = work.pop()!;
+    const trialChildren = work.concat(survivors); // remove 'cur'
+    const trial = assembleParent(trialChildren);
+
+    if (await check(trial)) {
+      // invariants unchanged → keep it eliminated (do nothing)
+    } else {
+      // significant → must keep
+      survivors.push(cur);
+    }
+  }
+
+  // Phase 2 — recurse into composite survivors
+  const recursed: Array<[string | number, JsonValue]> = [];
+  while (survivors.length) {
+    const [k, v] = survivors.pop()!;
+    let newV = v;
+
+    if (Array.isArray(v) || isPlainObject(v)) {
+      const buildWith = (parts: Array<[string | number, JsonValue]>) => {
+        if (Array.isArray(v)) {
+          // preserve index order
+          const arr: JsonValue[] = [];
+          for (const [idx, val] of parts.sort((a, b) => (a[0] as number) - (b[0] as number))) arr[idx as number] = val;
+          return arr.filter((x) => x !== undefined); // compact gaps due to removals
+        } else {
+          const obj: JsonObject = {};
+          for (const [kk, vv] of parts) obj[String(kk)] = vv;
+          return obj;
+        }
+      };
+
+      const childEntries = Array.isArray(v)
+        ? v.map((val, idx) => [idx, val] as [number, JsonValue])
+        : Object.entries(v) as Array<[string, JsonValue]>;
+
+      // nested check that swaps only this child and re-checks whole parent
+      const nestedCheck = async (childCandidate: any) => {
+        const parentParts = recursed.concat(survivors.map(x => x)).map(x => x); // current siblings
+        // replace k with childCandidate
+        const merged = parentParts.concat([[k, childCandidate]]);
+        const candidate = assembleParent(merged);
+        return check(candidate);
+      };
+
+      newV = await deltaMinimize(v, buildWith, childEntries, nestedCheck);
+    }
+
+    recursed.push([k, newV]);
+  }
+
+  return assembleParent(recursed);
+}
+
+async function minimizeJsonBody(
+  sdk: SDK<API>,
+  originalBody: unknown,
+  originalResp: unknown,
+  reqData: RequestData,
+  minimalQuery: URLSearchParams,
+  minimalHeaderKeys: string[],
+  originalHeaders: Record<string, string | string[] | undefined>,
+  urlObj: URL,
+  config: MinimizeConfig
+): Promise<unknown> {
+  try {
+    const bodyStr = originalBody?.toString?.() ?? '';
+    if (!isJsonString(bodyStr)) return originalBody;
+
+    const root = JSON.parse(bodyStr);
+
+    // trivial empties → nothing to do
+    if (root === null || (Array.isArray(root) && root.length === 0) || (isPlainObject(root) && Object.keys(root).length === 0)) {
+      return originalBody;
+    }
+
+    // outer check over full candidate
+    const check = (candidate: JsonValue) =>
+      checkJsonCandidate(
+        sdk,
+        candidate,
+        originalResp,
+        reqData,
+        minimalQuery,
+        minimalHeaderKeys,
+        originalHeaders,
+        urlObj,
+        config
+      );
+
+    let minimized: JsonValue;
+
+    if (Array.isArray(root)) {
+      const assemble = (parts: Array<[string | number, JsonValue]>) => {
+        const arr: JsonValue[] = [];
+        for (const [idx, val] of parts.sort((a, b) => (a[0] as number) - (b[0] as number))) arr[idx as number] = val;
+        return arr.filter((x) => x !== undefined);
+      };
+      const children = root.map((v, i) => [i, v] as [string | number, JsonValue]);
+      minimized = await deltaMinimize(root, assemble, children, check);
+    } else if (isPlainObject(root)) {
+      const assemble = (parts: Array<[string | number, JsonValue]>) => {
+        const obj: JsonObject = {};
+        for (const [k, v] of parts) obj[String(k)] = v;
+        return obj;
+      };
+      const children = Object.entries(root) as Array<[string | number, JsonValue]>;
+      minimized = await deltaMinimize(root, assemble, children, check);
+    } else {
+      // primitives cannot be minimized structurally
+      return originalBody;
+    }
+
+    const tmp = new RequestSpec('http://localhost:8080');
+    tmp.setBody(stableStringify(minimized));
+    return tmp.getBody();
+  } catch (e) {
+    sdk.console.error('JSON minimization error (recursive):', e);
+    return originalBody;
+  }
+}
+
 // Main minimization routine
-async function minimizeRequest(sdk: SDK<API>, requestId: string, config: any = DEFAULT_CONFIG): Promise<Result<MinimizeResult, Error>> {
+async function minimizeRequest(sdk: SDK<API>, requestId: string, config: MinimizeConfig = DEFAULT_CONFIG): Promise<Result<MinimizeResult, Error>> {
   try {
     // Fetch original request
     const reqWrapper = await sdk.requests.get(requestId);
@@ -303,7 +545,29 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: any = D
       }
     }
 
-    // 4. Build final minimized request and send
+    // 4. Minimize JSON body
+    // Try JSON minimization regardless of content-type - fallback detection for APIs that don't set proper headers
+    if (initBody) {
+      const bodyStr = initBody.toString();
+      if (isJsonString(bodyStr)) {
+        sdk.console.log('JSON body detected, applying recursive structural delta debugging');
+        minimalBody = await minimizeJsonBody(
+          sdk,
+          minimalBody,
+          originalResp,
+          reqData,
+          minimalQuery,
+          minimalHeaders, // Now use the minimized headers
+          originalHeaders,
+          urlObj,
+          config
+        ) as typeof minimalBody;
+      } else if (contentType.includes('application/json')) {
+        sdk.console.log('Content-type indicates JSON but body is not valid JSON, skipping JSON minimization');
+      }
+    }
+
+    // 5. Build final minimized request and send
     const finalSpec = new RequestSpec('http://localhost:8080');
     finalSpec.setMethod(reqData.getMethod());
     finalSpec.setHost(reqData.getHost());
@@ -357,13 +621,4 @@ export function init(sdk: SDK<API>) {
     }
     return result.value;
   });
-}
-
-// Helper to get keys from URLSearchParams in a TS-compatible way
-function getSearchParamKeys(params: URLSearchParams): string[] {
-  const keys: string[] = [];
-  params.forEach((_, key) => {
-    if (!keys.includes(key)) keys.push(key);
-  });
-  return keys;
 }
