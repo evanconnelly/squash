@@ -2,7 +2,7 @@
 
 Squash is a Caido plugin that adds a right-click context menu option to minimize an HTTP request. When activated, it launches a background job that:
 - Sends the original request
-- Iteratively removes query parameters, form fields, and headers (including individual cookies)
+- Iteratively removes query parameters, form fields, JSON, and headers (including individual cookies)
 - Compares responses to identify invariant behavior
 - Retains only fields necessary to preserve the original response
 - Sends the minimized request to a new Replay tab for review and testing
