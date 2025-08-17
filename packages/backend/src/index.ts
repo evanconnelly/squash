@@ -13,7 +13,13 @@ const DEFAULT_CONFIG = {
   },
   autoRemovedHeaders: ['sec-*'],
   doNotRemoveHeaders: [],
-  saveRequests: false
+  saveRequests: false,
+  minimizationSteps: {
+    queryParameters: true,
+    formBodyParameters: true,
+    headers: true,
+    jsonBody: true,
+  }
 };
 
 // Helper to delay execution
@@ -135,6 +141,12 @@ interface MinimizeConfig {
   autoRemovedHeaders: string[];
   doNotRemoveHeaders: string[];
   saveRequests: boolean;
+  minimizationSteps: {
+    queryParameters: boolean;
+    formBodyParameters: boolean;
+    headers: boolean;
+    jsonBody: boolean;
+  };
 }
 
 interface MinimizeResult {
@@ -393,7 +405,8 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
 
     // 1. Minimize query parameters
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
-    for (const key of getSearchParamKeys(urlObj.searchParams)) {
+    if (config.minimizationSteps?.queryParameters !== false) {
+      for (const key of getSearchParamKeys(urlObj.searchParams)) {
       const trialQuery = new URLSearchParams(minimalQuery);
       trialQuery.delete(key);
       const testSpec = new RequestSpec('http://localhost:8080');
@@ -411,15 +424,16 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       }
       await delay(config.rateLimit.minDelayMs);
       const trialResult = await sendRequestWithTimeout(sdk, testSpec, config);
-      if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
-        minimalQuery = trialQuery;
+        if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+          minimalQuery = trialQuery;
+        }
       }
     }
 
     // 2. Minimize form body parameters
     let minimalBody = initBody;
     const contentType = originalHeaders['content-type'] || '';
-    if (contentType.includes('application/x-www-form-urlencoded') && initBody) {
+    if (config.minimizationSteps?.formBodyParameters !== false && contentType.includes('application/x-www-form-urlencoded') && initBody) {
       let bodyParams = new URLSearchParams(initBody.toString());
       for (const key of getSearchParamKeys(bodyParams)) {
         const trialBody = new URLSearchParams(bodyParams);
@@ -451,7 +465,8 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
 
     // 3. Minimize headers (skip Host)
     let minimalHeaders = Object.keys(originalHeaders).filter(h => h.toLowerCase() !== 'host');
-    for (const headerKey of [...minimalHeaders]) {
+    if (config.minimizationSteps?.headers !== false) {
+      for (const headerKey of [...minimalHeaders]) {
       // Skip if header matches do-not-remove patterns
       if (shouldRemoveHeader(sdk, headerKey, config?.doNotRemoveHeaders ?? DEFAULT_CONFIG.doNotRemoveHeaders)) {
         sdk.console.log(`Skipping header ${headerKey} due to doNotRemoveHeaders`);
@@ -543,11 +558,12 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       if (res.response && await compareResponses(originalResp, res.response)) {
         minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
       }
+      }
     }
 
     // 4. Minimize JSON body
     // Try JSON minimization regardless of content-type - fallback detection for APIs that don't set proper headers
-    if (initBody) {
+    if (config.minimizationSteps?.jsonBody !== false && initBody) {
       const bodyStr = initBody.toString();
       if (isJsonString(bodyStr)) {
         sdk.console.log('JSON body detected, applying recursive structural delta debugging');

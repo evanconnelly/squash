@@ -15,7 +15,7 @@ export default defineConfig({
   id,
   name: "Squash",
   description: "Iteratively removes non-essential material from an HTTP request and opens the minimal form in Replay.",
-  version: "1.0.2",
+  version: "1.0.3",
   author: {
     name: "Evan Connelly",
     email: "evan@evanconnelly.com",

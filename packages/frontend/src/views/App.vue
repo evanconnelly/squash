@@ -40,6 +40,12 @@ const requestConfigMaxRetries = ref(2);
 const openTabAfterMinimize = ref(true);
 const saveRequests = ref(false);
 
+// Minimization steps state
+const queryParameters = ref(true);
+const formBodyParameters = ref(true);
+const headers = ref(true);
+const jsonBody = ref(true);
+
 // Auto-removed headers state
 const autoRemovedHeaders = ref([
   'sec-*'
@@ -102,6 +108,12 @@ onMounted(async () => {
     doNotRemoveHeaders.value = config.doNotRemoveHeaders ?? [];
     openTabAfterMinimize.value = config.openTabAfterMinimize ?? true;
     saveRequests.value = config.saveRequests ?? false;
+    
+    // Load minimization steps configuration
+    queryParameters.value = config.minimizationSteps?.queryParameters ?? true;
+    formBodyParameters.value = config.minimizationSteps?.formBodyParameters ?? true;
+    headers.value = config.minimizationSteps?.headers ?? true;
+    jsonBody.value = config.minimizationSteps?.jsonBody ?? true;
   }
 });
 
@@ -119,7 +131,13 @@ const saveConfig = async () => {
     autoRemovedHeaders: autoRemovedHeaders.value,
     doNotRemoveHeaders: doNotRemoveHeaders.value,
     openTabAfterMinimize: openTabAfterMinimize.value,
-    saveRequests: saveRequests.value
+    saveRequests: saveRequests.value,
+    minimizationSteps: {
+      queryParameters: queryParameters.value,
+      formBodyParameters: formBodyParameters.value,
+      headers: headers.value,
+      jsonBody: jsonBody.value,
+    }
   });
   sdk.window.showToast("Configuration saved successfully", { variant: "success" });
 };
@@ -177,6 +195,30 @@ const saveConfig = async () => {
             </div>
           </div>
           <Button label="Save Configuration" @click="saveConfig" class="mt-4" />
+        </div>
+
+        <!-- Minimization Steps Section -->
+        <div class="mb-8">
+          <h2 class="text-xl font-semibold mb-4">Minimization Steps</h2>
+          <p class="text-sm text-gray-600 mb-4">Select which parts of the request to minimize</p>
+          <div class="grid grid-cols-2 gap-4">
+            <div class="flex items-center gap-2">
+              <input type="checkbox" v-model="queryParameters" @change="saveConfig" />
+              <label>Query Parameters</label>
+            </div>
+            <div class="flex items-center gap-2">
+              <input type="checkbox" v-model="formBodyParameters" @change="saveConfig" />
+              <label>Form Body Parameters</label>
+            </div>
+            <div class="flex items-center gap-2">
+              <input type="checkbox" v-model="headers" @change="saveConfig" />
+              <label>Headers</label>
+            </div>
+            <div class="flex items-center gap-2">
+              <input type="checkbox" v-model="jsonBody" @change="saveConfig" />
+              <label>JSON Body</label>
+            </div>
+          </div>
         </div>
 
         <!-- Auto-removed Headers Section -->
