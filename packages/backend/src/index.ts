@@ -558,6 +558,16 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
 
     const baseline = buildBaseline(samples);
 
+    // Track what gets removed so the result can report a descriptive summary.
+    const countCookies = (raw: string | string[] | undefined): number => {
+      const s = Array.isArray(raw) ? raw.join('; ') : (raw || '');
+      return s.split(';').map(c => c.trim()).filter(Boolean).length;
+    };
+    const originalQueryCount = getSearchParamKeys(urlObj.searchParams).length;
+    const originalBodyLen = initBody ? initBody.toString().length : 0;
+    let originalFormCount = 0;
+    let finalFormCount = 0;
+
     // 1. Minimize query parameters
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
     if (config.minimizationSteps?.queryParameters !== false) {
@@ -590,6 +600,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
     const contentType = originalHeaders['content-type'] || '';
     if (config.minimizationSteps?.formBodyParameters !== false && contentType.includes('application/x-www-form-urlencoded') && initBody) {
       let bodyParams = new URLSearchParams(initBody.toString());
+      originalFormCount = getSearchParamKeys(bodyParams).length;
       for (const key of getSearchParamKeys(bodyParams)) {
         const trialBody = new URLSearchParams(bodyParams);
         trialBody.delete(key);
@@ -616,10 +627,15 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
           minimalBody = tempSpec.getBody();
         }
       }
+      finalFormCount = getSearchParamKeys(bodyParams).length;
     }
 
     // 3. Minimize headers (skip Host)
     let minimalHeaders = Object.keys(originalHeaders).filter(h => h.toLowerCase() !== 'host');
+    // Capture header/cookie counts before minimization (cookies counted separately).
+    const originalHeaderCount = minimalHeaders.filter(h => h.toLowerCase() !== 'cookie').length;
+    const originalCookieKey = minimalHeaders.find(h => h.toLowerCase() === 'cookie');
+    const originalCookieCount = originalCookieKey ? countCookies(originalHeaders[originalCookieKey]) : 0;
     if (config.minimizationSteps?.headers !== false) {
       for (const headerKey of [...minimalHeaders]) {
       // Skip if header matches do-not-remove patterns
@@ -768,10 +784,34 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       return err(new Error(`Failed to create replay session: ${error instanceof Error ? error.message : 'Unknown error'}`));
     }
 
+    // Assemble a descriptive summary of what was removed.
+    const finalQueryCount = getSearchParamKeys(minimalQuery).length;
+    const finalHeaderCount = minimalHeaders.filter(h => h.toLowerCase() !== 'cookie').length;
+    const finalCookieKey = minimalHeaders.find(h => h.toLowerCase() === 'cookie');
+    const finalCookieCount = finalCookieKey ? countCookies(originalHeaders[finalCookieKey]) : 0;
+    const finalBodyLen = minimalBody ? minimalBody.toString().length : 0;
+
+    const summaryParts: string[] = [];
+    if (originalQueryCount > 0) summaryParts.push(`${originalQueryCount - finalQueryCount}/${originalQueryCount} query params`);
+    if (originalFormCount > 0) summaryParts.push(`${originalFormCount - finalFormCount}/${originalFormCount} form fields`);
+    if (originalHeaderCount > 0) summaryParts.push(`${originalHeaderCount - finalHeaderCount}/${originalHeaderCount} headers`);
+    if (originalCookieCount > 0) summaryParts.push(`${originalCookieCount - finalCookieCount}/${originalCookieCount} cookies`);
+    if (originalBodyLen > 0 && finalBodyLen < originalBodyLen) {
+      summaryParts.push(`body ${originalBodyLen}→${finalBodyLen} bytes`);
+    }
+
+    const statusCode = finalResult.response?.getCode();
+    const removedSummary = summaryParts.length
+      ? `Removed ${summaryParts.join(', ')}`
+      : 'Nothing could be safely removed';
+    const successMessage = statusCode !== undefined
+      ? `${removedSummary} · final status ${statusCode}`
+      : removedSummary;
+
     return ok({
       _type: session ? 'success' : 'warning',
-      message: session ? 'Request minimized successfully' : 'Minimized but could not open replay session',
-      statusCode: finalResult.response?.getCode(),
+      message: session ? successMessage : `${successMessage} (could not open replay session)`,
+      statusCode,
       requestId: session?.getId(),
     });
   } catch (error) {

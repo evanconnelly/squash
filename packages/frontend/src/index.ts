@@ -111,7 +111,7 @@ export async function init(sdk: FrontendSDK) {
         }
 
         if (result._type === "success" && result.requestId) {
-          sdk.window.showToast("Request minimized successfully!", { variant: "success" });
+          sdk.window.showToast(result.message || "Request minimized successfully!", { variant: "success", duration: 6000 });
           try {
             if (config && typeof config === 'object' && 'openTabAfterMinimize' in config && config.openTabAfterMinimize) {
               await sdk.replay.openTab(result.requestId);
