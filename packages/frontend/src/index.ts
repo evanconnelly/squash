@@ -71,28 +71,28 @@ export async function init(sdk: FrontendSDK) {
         return;
       }
 
+      // Resolve the target request id across every context type a command can
+      // arrive in: the request pane, the response pane, a selected history row,
+      // or a keyboard shortcut / command palette (BaseContext, which carries no
+      // request).
       let requestId: string | undefined;
-
-      // Handle HTTP History requests
-      if (context.type === 'RequestContext') {
-        if (!context.request || typeof context.request !== 'object') {
-          sdk.window.showToast("No request object in context", { variant: "error" });
+      switch (context.type) {
+        case 'RequestContext':
+        case 'ResponseContext':
+          requestId = (context.request as { id?: string } | undefined)?.id;
+          break;
+        case 'RequestRowContext':
+          requestId = context.requests?.[0]?.id;
+          break;
+        case 'BaseContext':
+          // Caido delivers BaseContext (no request) for keyboard shortcuts and
+          // the command palette, so there is nothing to minimize. Known upstream
+          // limitation: https://github.com/caido/caido/issues/1565
+          sdk.window.showToast(
+            "Squash can't run from a keyboard shortcut or command palette yet — Caido doesn't pass the request in that context (caido/caido#1565). Right-click a request → Squash → Minimize Request instead.",
+            { variant: "error", duration: 6000 },
+          );
           return;
-        }
-        requestId = (context.request as { id?: string }).id;
-      }
-      // Handle Replay tool requests
-      else if (context.type === 'RequestRowContext') {
-        if (!context.requests || !Array.isArray(context.requests) || context.requests.length === 0) {
-          sdk.window.showToast("No requests in context", { variant: "error" });
-          return;
-        }
-        const firstRequest = context.requests[0];
-        if (!firstRequest || !firstRequest.id) {
-          sdk.window.showToast("Request missing ID", { variant: "error" });
-          return;
-        }
-        requestId = firstRequest.id;
       }
 
       if (!requestId) {
@@ -173,4 +173,8 @@ export async function init(sdk: FrontendSDK) {
     commandId: "squash.minimize",
     leadingIcon: "fas fa-compress"
   });
+
+  // NOTE: No default keyboard shortcut is registered. Caido invokes shortcut-
+  // triggered commands with a BaseContext that carries no request, so the
+  // command cannot resolve a request id to minimize. See caido/caido#1565.
 }
