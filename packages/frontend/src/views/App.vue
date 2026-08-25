@@ -5,14 +5,30 @@ import Chip from "primevue/chip";
 import InputNumber from "primevue/inputnumber";
 import MenuBar from "primevue/menubar";
 import { useSDK } from "@/plugins/sdk";
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed } from "vue";
 import Usage from "./Usage.vue";
+import { jobs, clearFinishedJobs, markCancelRequested, runningCount, type SquashJob } from "../jobs";
 
 // Retrieve the SDK instance to interact with the backend
 const sdk = useSDK();
 
 // Tab state
-const page = ref<"Configuration" | "Usage">("Configuration");
+const page = ref<"Configuration" | "Jobs" | "Usage">("Configuration");
+
+// Ticking clock so running-job durations update live.
+const now = ref(Date.now());
+let clock: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  clock = setInterval(() => (now.value = Date.now()), 1000);
+});
+onUnmounted(() => {
+  if (clock) clearInterval(clock);
+});
+
+const jobsLabel = computed(() => {
+  const running = runningCount();
+  return running > 0 ? `Jobs (${running})` : "Jobs";
+});
 
 // Create a computed property for menu items that updates when page changes
 const items = computed(() => [
@@ -24,6 +40,13 @@ const items = computed(() => [
     class: page.value === "Configuration" ? "active-nav-item" : ""
   },
   {
+    label: jobsLabel.value,
+    command: () => {
+      page.value = "Jobs";
+    },
+    class: page.value === "Jobs" ? "active-nav-item" : ""
+  },
+  {
     label: "Usage",
     command: () => {
       page.value = "Usage";
@@ -31,6 +54,38 @@ const items = computed(() => [
     class: page.value === "Usage" ? "active-nav-item" : ""
   },
 ]);
+
+// --- Jobs tab helpers ---
+const hasFinishedJobs = computed(() => jobs.some((j) => j.status !== "running"));
+
+const cancelJob = async (job: SquashJob) => {
+  if (job.status !== "running" || job.cancelRequested) return;
+  markCancelRequested(job.id);
+  try {
+    await sdk.backend.cancelMinimize(job.id);
+  } catch (error) {
+    console.error("Failed to request cancellation:", error);
+    sdk.window.showToast("Failed to request cancellation", { variant: "error" });
+  }
+};
+
+const formatDuration = (job: SquashJob): string => {
+  const end = job.finishedAt ?? now.value;
+  const secs = Math.max(0, Math.round((end - job.startedAt) / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  return `${mins}m ${secs % 60}s`;
+};
+
+const statusClass = (status: SquashJob["status"]): string => {
+  switch (status) {
+    case "running": return "job-status-running";
+    case "completed": return "job-status-completed";
+    case "cancelled": return "job-status-cancelled";
+    case "failed": return "job-status-failed";
+    default: return "";
+  }
+};
 
 // Configuration state
 const rateLimitRequestPerSecond = ref(2);
@@ -277,6 +332,50 @@ const saveConfig = async () => {
         </div>
       </div>
 
+      <!-- Jobs Tab -->
+      <div v-else-if="page === 'Jobs'">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-semibold">Minimization Jobs</h2>
+          <Button
+            label="Clear finished"
+            severity="secondary"
+            :disabled="!hasFinishedJobs"
+            @click="clearFinishedJobs"
+          />
+        </div>
+
+        <div v-if="jobs.length === 0" class="text-sm text-gray-600">
+          No minimization jobs yet. Right-click a request and choose
+          <span class="font-semibold">Squash → Minimize Request</span> to start one.
+        </div>
+
+        <div v-else class="flex flex-col gap-2">
+          <div
+            v-for="job in jobs"
+            :key="job.id"
+            class="job-row flex items-center gap-3 p-3 rounded border"
+          >
+            <span class="job-status" :class="statusClass(job.status)">
+              {{ job.cancelRequested && job.status === 'running' ? 'cancelling' : job.status }}
+            </span>
+            <div class="flex-1 min-w-0">
+              <div class="font-medium truncate" :title="job.label">{{ job.label }}</div>
+              <div class="text-xs text-gray-600 truncate">
+                {{ formatDuration(job) }}<template v-if="job.message"> · {{ job.message }}</template>
+              </div>
+            </div>
+            <Button
+              v-if="job.status === 'running'"
+              label="Cancel"
+              severity="danger"
+              size="small"
+              :disabled="job.cancelRequested"
+              @click="cancelJob(job)"
+            />
+          </div>
+        </div>
+      </div>
+
       <!-- Usage Tab -->
       <div v-else-if="page === 'Usage'">
         <Usage />
@@ -303,6 +402,42 @@ const saveConfig = async () => {
 .logo {
   font-size: 1.5em;
   color: var(--c-text-primary);
+}
+
+.job-row {
+  border-color: var(--c-border, rgba(255, 255, 255, 0.1));
+  background-color: var(--c-bg-subtle);
+}
+
+.job-status {
+  flex-shrink: 0;
+  min-width: 5.5rem;
+  text-align: center;
+  text-transform: capitalize;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+}
+
+.job-status-running {
+  color: #1d4ed8;
+  background-color: rgba(59, 130, 246, 0.15);
+}
+
+.job-status-completed {
+  color: #15803d;
+  background-color: rgba(34, 197, 94, 0.15);
+}
+
+.job-status-cancelled {
+  color: #b45309;
+  background-color: rgba(245, 158, 11, 0.15);
+}
+
+.job-status-failed {
+  color: #b91c1c;
+  background-color: rgba(239, 68, 68, 0.15);
 }
 </style>
 <style>

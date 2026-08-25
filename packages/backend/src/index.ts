@@ -25,6 +25,22 @@ const DEFAULT_CONFIG = {
 // Helper to delay execution
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Job ids that have been requested to cancel. Checked between requests so an
+// in-flight minimization can bail out promptly.
+const cancelledJobs = new Set<string>();
+
+// Thrown internally when a job is cancelled mid-run; caught and reported cleanly.
+class CancelledError extends Error {
+  constructor() {
+    super('Minimization cancelled');
+    this.name = 'CancelledError';
+  }
+}
+
+function throwIfCancelled(jobId?: string): void {
+  if (jobId && cancelledJobs.has(jobId)) throw new CancelledError();
+}
+
 // Helper to normalize header names and values
 function normalizeHeader(headerName: string, headerValue: string | string[] | undefined): { name: string, value: string | string[] } {
   const normalizedName = headerName.toLowerCase().trim();
@@ -354,8 +370,10 @@ async function checkJsonCandidate(
   minimalHeaderKeys: string[],
   originalHeaders: Record<string, string | string[] | undefined>,
   urlObj: URL,
-  config: MinimizeConfig
+  config: MinimizeConfig,
+  jobId?: string
 ): Promise<boolean> {
+  throwIfCancelled(jobId);
   const spec = new RequestSpec('http://localhost:8080');
   spec.setMethod(reqData.getMethod());
   spec.setHost(reqData.getHost());
@@ -456,7 +474,8 @@ async function minimizeJsonBody(
   minimalHeaderKeys: string[],
   originalHeaders: Record<string, string | string[] | undefined>,
   urlObj: URL,
-  config: MinimizeConfig
+  config: MinimizeConfig,
+  jobId?: string
 ): Promise<unknown> {
   try {
     const bodyStr = originalBody?.toString?.() ?? '';
@@ -480,7 +499,8 @@ async function minimizeJsonBody(
         minimalHeaderKeys,
         originalHeaders,
         urlObj,
-        config
+        config,
+        jobId
       );
 
     let minimized: JsonValue;
@@ -510,13 +530,14 @@ async function minimizeJsonBody(
     tmp.setBody(stableStringify(minimized));
     return tmp.getBody();
   } catch (e) {
+    if (e instanceof CancelledError) throw e; // propagate cancellation
     sdk.console.error('JSON minimization error (recursive):', e);
     return originalBody;
   }
 }
 
 // Main minimization routine
-async function minimizeRequest(sdk: SDK<API>, requestId: string, config: MinimizeConfig = DEFAULT_CONFIG): Promise<Result<MinimizeResult, Error>> {
+async function minimizeRequest(sdk: SDK<API>, requestId: string, config: MinimizeConfig = DEFAULT_CONFIG, jobId?: string): Promise<Result<MinimizeResult, Error>> {
   try {
     // Fetch original request
     const reqWrapper = await sdk.requests.get(requestId);
@@ -572,6 +593,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
     if (config.minimizationSteps?.queryParameters !== false) {
       for (const key of getSearchParamKeys(urlObj.searchParams)) {
+      throwIfCancelled(jobId);
       const trialQuery = new URLSearchParams(minimalQuery);
       trialQuery.delete(key);
       const testSpec = new RequestSpec('http://localhost:8080');
@@ -602,6 +624,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       let bodyParams = new URLSearchParams(initBody.toString());
       originalFormCount = getSearchParamKeys(bodyParams).length;
       for (const key of getSearchParamKeys(bodyParams)) {
+        throwIfCancelled(jobId);
         const trialBody = new URLSearchParams(bodyParams);
         trialBody.delete(key);
         const testSpec = new RequestSpec('http://localhost:8080');
@@ -638,6 +661,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
     const originalCookieCount = originalCookieKey ? countCookies(originalHeaders[originalCookieKey]) : 0;
     if (config.minimizationSteps?.headers !== false) {
       for (const headerKey of [...minimalHeaders]) {
+      throwIfCancelled(jobId);
       // Skip if header matches do-not-remove patterns
       if (shouldRemoveHeader(sdk, headerKey, config?.doNotRemoveHeaders ?? DEFAULT_CONFIG.doNotRemoveHeaders)) {
         sdk.console.log(`Skipping header ${headerKey} due to doNotRemoveHeaders`);
@@ -678,6 +702,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
 
         // Otherwise try each cookie
         for (const cookie of [...cookies]) {
+          throwIfCancelled(jobId);
           const remaining = cookies.filter(c => c !== cookie);
           const spec = new RequestSpec('http://localhost:8080');
           spec.setMethod(reqData.getMethod());
@@ -747,7 +772,8 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
           minimalHeaders, // Now use the minimized headers
           originalHeaders,
           urlObj,
-          config
+          config,
+          jobId
         ) as typeof minimalBody;
       } else if (contentType.includes('application/json')) {
         sdk.console.log('Content-type indicates JSON but body is not valid JSON, skipping JSON minimization');
@@ -815,21 +841,31 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       requestId: session?.getId(),
     });
   } catch (error) {
+    if (error instanceof CancelledError) {
+      return ok({ _type: 'cancelled', message: 'Minimization cancelled' });
+    }
     sdk.console.error('Minimization error:', error);
     return err(error instanceof Error ? error : new Error('Unknown error'));
+  } finally {
+    if (jobId) cancelledJobs.delete(jobId);
   }
 }
 
 export type API = DefineAPI<{
-  minimizeRequest: (sdk: SDK<API>, requestId: string, config: any) => Promise<MinimizeResult | Error>
+  minimizeRequest: (sdk: SDK<API>, requestId: string, config: any, jobId?: string) => Promise<MinimizeResult | Error>
+  cancelMinimize: (sdk: SDK<API>, jobId: string) => Promise<void>
 }>;
 
 export function init(sdk: SDK<API>) {
-  sdk.api.register('minimizeRequest', async (sdk: SDK<API>, requestId: string, config: any) => {
-    const result = await minimizeRequest(sdk, requestId, config);
+  sdk.api.register('minimizeRequest', async (sdk: SDK<API>, requestId: string, config: any, jobId?: string) => {
+    const result = await minimizeRequest(sdk, requestId, config, jobId);
     if (result.isErr()) {
       throw result.error;
     }
     return result.value;
+  });
+
+  sdk.api.register('cancelMinimize', async (_sdk: SDK<API>, jobId: string) => {
+    cancelledJobs.add(jobId);
   });
 }

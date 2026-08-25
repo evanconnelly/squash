@@ -4,6 +4,7 @@ import App from "./views/App.vue";
 import { type FrontendSDK } from "./types";
 import { Classic } from "@caido/primevue";
 import PrimeVue from "primevue/config";
+import { addJob, finishJob, runningCount, genJobId } from "./jobs";
 
 
 const DEFAULT_CONFIG = {
@@ -42,9 +43,12 @@ export async function init(sdk: FrontendSDK) {
     body: root,
   });
 
-  sdk.sidebar.registerItem("Squash", "/squash", {
+  const sidebarItem = sdk.sidebar.registerItem("Squash", "/squash", {
     icon: "fas fa-compress",
   });
+
+  // Keep the sidebar badge in sync with the number of running jobs.
+  const updateBadge = () => sidebarItem.setCount(runningCount());
 
   let storage = await sdk.storage.get();
   if (!storage) {
@@ -96,21 +100,35 @@ export async function init(sdk: FrontendSDK) {
         return;
       }
 
+      // Derive a human-readable label for the job list from whatever the
+      // context exposes, falling back to the request id.
+      const ctx = context as { request?: Record<string, unknown>; requests?: Record<string, unknown>[] };
+      const reqObj = ctx.request ?? ctx.requests?.[0] ?? {};
+      const host = (reqObj.host ?? reqObj.hostname) as string | undefined;
+      const pathOrUrl = (reqObj.path ?? reqObj.url) as string | undefined;
+      const jobLabel = [host, pathOrUrl].filter(Boolean).join('') || `Request ${requestId.slice(0, 8)}`;
+
+      const jobId = genJobId();
+      addJob(jobId, jobLabel);
+      updateBadge();
+
       sdk.window.showToast("Squashing…", { variant: "info", duration: 1500 });
       try {
         let config = await sdk.storage.get();
         console.log(`Config: ${JSON.stringify(config)}`);
-        const result = await sdk.backend.minimizeRequest(requestId, config);
-        
+        const result = await sdk.backend.minimizeRequest(requestId, config, jobId);
+
         console.log('Minimization result:', result);
 
         if (result instanceof Error) {
           console.error('Minimization error:', result);
+          finishJob(jobId, "failed", result.message);
           sdk.window.showToast(`Error: ${result.message}`, { variant: "error" });
           return;
         }
 
         if (result._type === "success" && result.requestId) {
+          finishJob(jobId, "completed", result.message);
           sdk.window.showToast(result.message || "Request minimized successfully!", { variant: "success", duration: 6000 });
           try {
             if (config && typeof config === 'object' && 'openTabAfterMinimize' in config && config.openTabAfterMinimize) {
@@ -120,16 +138,24 @@ export async function init(sdk: FrontendSDK) {
             console.error('Failed to open replay tab:', tabError);
             sdk.window.showToast("Request minimized but failed to open replay tab", { variant: "warning" });
           }
+        } else if (result._type === "cancelled") {
+          finishJob(jobId, "cancelled", result.message);
+          sdk.window.showToast(result.message || "Minimization cancelled", { variant: "info" });
         } else if (result._type === "warning") {
+          finishJob(jobId, "completed", result.message);
           sdk.window.showToast(result.message || "Request minimized with warnings", { variant: "warning" });
         } else {
           console.error('Unexpected result type:', result);
+          finishJob(jobId, "failed", result.message);
           sdk.window.showToast(result.message || "Unknown error occurred", { variant: "error" });
         }
       } catch (error: unknown) {
         console.error('Minimization error:', error);
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+        finishJob(jobId, "failed", errorMessage);
         sdk.window.showToast(`Error: ${errorMessage}`, { variant: "error" });
+      } finally {
+        updateBadge();
       }
     }
   });
