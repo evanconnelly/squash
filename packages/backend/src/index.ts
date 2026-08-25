@@ -77,37 +77,183 @@ async function sendRequestWithTimeout(sdk: SDK<API>, spec: RequestSpec, config: 
   }
 }
 
-// Compare two responses for equivalence
-async function compareResponses(original: any, current: any): Promise<boolean> {
-  if (original.getCode() !== current.getCode()) return false;
+// Number of times to send the original request when profiling the baseline.
+// More samples give a better picture of what varies naturally between identical
+// requests (timestamps, tokens, nonces, etc.).
+const BASELINE_SAMPLES = 3;
 
-  const origHeaders = original.getHeaders() || {};
-  const currHeaders = current.getHeaders() || {};
-  if (origHeaders['content-length'] !== currHeaders['content-length']) return false;
-  if (origHeaders['content-type'] !== currHeaders['content-type']) return false;
+// The measurable features of a single response, used to profile the baseline
+// and to compare trial responses against it.
+interface ResponseSample {
+  code: number;
+  contentType: string | undefined;
+  contentLength: number | undefined;
+  bodyLen: number;
+  location: string | undefined;
+  jsonKeys: string[] | undefined;
+}
 
-  // Check Location header if present
-  const origLocation = original.getHeader('location');
-  const currLocation = current.getHeader('location');
-  if (origLocation?.length > 0 || currLocation?.length > 0) {
-    if (!origLocation?.length || !currLocation?.length) return false;
-    if (origLocation[0] !== currLocation[0]) return false;
+// A tolerance profile learned from several identical requests. Features that
+// vary naturally across samples are matched loosely (or ignored); features that
+// stay constant are matched strictly.
+interface BaselineProfile {
+  statusCode: number;
+  contentType: string | undefined;
+  contentTypeStable: boolean;
+  minBodyLen: number;
+  maxBodyLen: number;
+  bodySlack: number;
+  contentLengthPresent: boolean;
+  minCL: number | undefined;
+  maxCL: number | undefined;
+  locationStable: boolean;
+  locationPresent: boolean;
+  locationAbsent: boolean;
+  location: string | undefined;
+  isJson: boolean;
+  stableJsonKeys: string[] | undefined;
+  allJsonKeys: string[] | undefined;
+}
+
+// Extract the comparable features from a response object.
+function extractSample(resp: any): ResponseSample {
+  const headers = resp.getHeaders() || {};
+  const code = resp.getCode();
+
+  const contentType = headers['content-type'];
+
+  const clRaw = headers['content-length'];
+  const clStr = Array.isArray(clRaw) ? clRaw[0] : clRaw;
+  const clNum = clStr !== undefined && clStr !== '' ? Number(clStr) : NaN;
+  const contentLength = Number.isFinite(clNum) ? clNum : undefined;
+
+  const bodyStr = resp.getBody()?.toString() ?? '';
+  const bodyLen = bodyStr.length;
+
+  const locRaw = resp.getHeader('location');
+  const location = locRaw?.length ? locRaw[0] : undefined;
+
+  let jsonKeys: string[] | undefined;
+  if (typeof contentType === 'string' && contentType.includes('application/json')) {
+    try {
+      const parsed = JSON.parse(bodyStr || '{}');
+      if (isPlainObject(parsed)) jsonKeys = Object.keys(parsed).sort();
+    } catch {
+      // not valid JSON despite the header — leave keys undefined
+    }
   }
 
-  const origBody = original.getBody();
-  const currBody = current.getBody();
-  if (origBody?.toString().length !== currBody?.toString().length) return false;
-  
-  const contentType = origHeaders['content-type'];
-  if (contentType?.includes('application/json')) {
-    try {
-      const origJson = JSON.parse(origBody.toString() || '{}');
-      const currJson = JSON.parse(currBody.toString() || '{}');
-      const origKeys = Object.keys(origJson).sort();
-      const currKeys = Object.keys(currJson).sort();
-      if (JSON.stringify(origKeys) !== JSON.stringify(currKeys)) return false;
-    } catch {
-      if (origBody.toString() !== currBody.toString()) return false;
+  return { code, contentType, contentLength, bodyLen, location, jsonKeys };
+}
+
+// Build a tolerance profile from one or more baseline samples.
+function buildBaseline(samples: ResponseSample[]): BaselineProfile {
+  const first = samples[0]!; // callers guarantee at least one sample
+  const bodyLens = samples.map(s => s.bodyLen);
+  const minBodyLen = Math.min(...bodyLens);
+  const maxBodyLen = Math.max(...bodyLens);
+  // Observed variation; used to widen the allowed band on both sides so 2-3
+  // samples don't under-estimate the true jitter. Zero when fully stable, which
+  // reduces to an exact-length match (no regression for static endpoints).
+  const bodySlack = maxBodyLen - minBodyLen;
+
+  const cls = samples
+    .map(s => s.contentLength)
+    .filter((n): n is number => n !== undefined);
+  const contentLengthPresent = cls.length === samples.length && cls.length > 0;
+  const minCL = contentLengthPresent ? Math.min(...cls) : undefined;
+  const maxCL = contentLengthPresent ? Math.max(...cls) : undefined;
+
+  const contentTypes = samples.map(s => s.contentType);
+  const contentTypeStable = contentTypes.every(c => c === first.contentType);
+
+  const locations = samples.map(s => s.location);
+  const locationStable = locations.every(l => l === first.location);
+  const locationPresent = locations.every(l => l !== undefined && l.length > 0);
+  const locationAbsent = locations.every(l => l === undefined || l.length === 0);
+
+  // JSON top-level keys: stable keys appear in every sample; volatile keys
+  // appear in some. A trial must keep all stable keys and introduce no keys
+  // that were never seen.
+  let stableJsonKeys: string[] | undefined;
+  let allJsonKeys: string[] | undefined;
+  const keySets = samples
+    .map(s => s.jsonKeys)
+    .filter((k): k is string[] => k !== undefined);
+  if (keySets.length === samples.length && keySets.length > 0) {
+    stableJsonKeys = keySets.reduce((acc, ks) => acc.filter(k => ks.includes(k)));
+    const union = new Set<string>();
+    keySets.forEach(ks => ks.forEach(k => union.add(k)));
+    allJsonKeys = [...union];
+  }
+
+  return {
+    statusCode: first.code,
+    contentType: first.contentType,
+    contentTypeStable,
+    minBodyLen,
+    maxBodyLen,
+    bodySlack,
+    contentLengthPresent,
+    minCL,
+    maxCL,
+    locationStable,
+    locationPresent,
+    locationAbsent,
+    location: first.location,
+    isJson: typeof first.contentType === 'string' && first.contentType.includes('application/json'),
+    stableJsonKeys,
+    allJsonKeys,
+  };
+}
+
+// Compare a trial response against the learned baseline profile.
+function matchesBaseline(baseline: BaselineProfile, resp: any): boolean {
+  const s = extractSample(resp);
+
+  // Status code — strongest signal, always required.
+  if (s.code !== baseline.statusCode) return false;
+
+  // Content-type — enforce only if it was constant across baseline samples.
+  if (baseline.contentTypeStable && s.contentType !== baseline.contentType) return false;
+
+  // Location — exact match if stable, otherwise require presence parity.
+  if (baseline.locationStable) {
+    if ((s.location ?? '') !== (baseline.location ?? '')) return false;
+  } else if (baseline.locationPresent) {
+    if (!s.location || s.location.length === 0) return false;
+  } else if (baseline.locationAbsent) {
+    if (s.location && s.location.length > 0) return false;
+  }
+
+  // Body length — allow within the observed band widened by the observed slack.
+  if (s.bodyLen < baseline.minBodyLen - baseline.bodySlack ||
+      s.bodyLen > baseline.maxBodyLen + baseline.bodySlack) {
+    return false;
+  }
+
+  // Content-length header — same tolerance, only when present in every sample.
+  if (baseline.contentLengthPresent &&
+      s.contentLength !== undefined &&
+      baseline.minCL !== undefined &&
+      baseline.maxCL !== undefined) {
+    const clSlack = baseline.maxCL - baseline.minCL;
+    if (s.contentLength < baseline.minCL - clSlack ||
+        s.contentLength > baseline.maxCL + clSlack) {
+      return false;
+    }
+  }
+
+  // JSON structure — trial keys must be a superset of stable keys and a subset
+  // of all keys ever seen.
+  if (baseline.isJson && baseline.stableJsonKeys && baseline.allJsonKeys && s.jsonKeys) {
+    const curSet = new Set(s.jsonKeys);
+    for (const k of baseline.stableJsonKeys) {
+      if (!curSet.has(k)) return false;
+    }
+    const allSet = new Set(baseline.allJsonKeys);
+    for (const k of s.jsonKeys) {
+      if (!allSet.has(k)) return false;
     }
   }
 
@@ -202,7 +348,7 @@ function isJsonString(str: string): boolean {
 async function checkJsonCandidate(
   sdk: SDK<API>,
   candidateObj: JsonValue,
-  originalResp: unknown,
+  baseline: BaselineProfile,
   reqData: RequestData,
   minimalQuery: URLSearchParams,
   minimalHeaderKeys: string[],
@@ -232,7 +378,7 @@ async function checkJsonCandidate(
 
   await delay(config.rateLimit.minDelayMs);
   const res = await sendRequestWithTimeout(sdk, spec, config);
-  return !!res.response && await compareResponses(originalResp, res.response);
+  return !!res.response && matchesBaseline(baseline, res.response);
 }
 
 // Recursively minimize JSON
@@ -304,7 +450,7 @@ async function deltaMinimize(
 async function minimizeJsonBody(
   sdk: SDK<API>,
   originalBody: unknown,
-  originalResp: unknown,
+  baseline: BaselineProfile,
   reqData: RequestData,
   minimalQuery: URLSearchParams,
   minimalHeaderKeys: string[],
@@ -328,7 +474,7 @@ async function minimizeJsonBody(
       checkJsonCandidate(
         sdk,
         candidate,
-        originalResp,
+        baseline,
         reqData,
         minimalQuery,
         minimalHeaderKeys,
@@ -396,12 +542,21 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       else originalSpec.setHeader(name, value);
     }
 
-    // Send baseline
-    const originalResult = await sendRequestWithTimeout(sdk, originalSpec, config);
-    if (!originalResult) return err(new Error('Failed to get original response'));
-    
-    const originalResp = originalResult.response;
-    if (!originalResp) return err(new Error('Failed to get original response'));
+    // Send the original request several times to profile what varies naturally
+    // (timestamps, tokens, nonces, ...) so trial comparisons tolerate that jitter.
+    const samples: ResponseSample[] = [];
+    for (let i = 0; i < BASELINE_SAMPLES; i++) {
+      if (i > 0) await delay(config.rateLimit.minDelayMs);
+      const result = await sendRequestWithTimeout(sdk, originalSpec, config);
+      if (!result || !result.response) {
+        if (samples.length === 0) return err(new Error('Failed to get original response'));
+        break; // network hiccup mid-profiling — proceed with the samples we have
+      }
+      samples.push(extractSample(result.response));
+    }
+    if (samples.length === 0) return err(new Error('Failed to get original response'));
+
+    const baseline = buildBaseline(samples);
 
     // 1. Minimize query parameters
     let minimalQuery = new URLSearchParams(urlObj.searchParams);
@@ -424,7 +579,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       }
       await delay(config.rateLimit.minDelayMs);
       const trialResult = await sendRequestWithTimeout(sdk, testSpec, config);
-        if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+        if (trialResult.response && matchesBaseline(baseline, trialResult.response)) {
           minimalQuery = trialQuery;
         }
       }
@@ -454,7 +609,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
         testSpec.setBody(bodyStr);
         await delay(config.rateLimit.minDelayMs);
         const trialResult = await sendRequestWithTimeout(sdk, testSpec, config);
-        if (trialResult.response && await compareResponses(originalResp, trialResult.response)) {
+        if (trialResult.response && matchesBaseline(baseline, trialResult.response)) {
           bodyParams = trialBody;
           const tempSpec = new RequestSpec('http://localhost:8080');
           tempSpec.setBody(bodyStr);
@@ -500,7 +655,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
           else if (value !== undefined) removeAll.setHeader(name, String(value));
         }
         const allResult = await sendRequestWithTimeout(sdk, removeAll, config);
-        if (allResult.response && await compareResponses(originalResp, allResult.response)) {
+        if (allResult.response && matchesBaseline(baseline, allResult.response)) {
           minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
           continue;
         }
@@ -527,7 +682,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
           }
           await delay(config.rateLimit.minDelayMs);
           const result = await sendRequestWithTimeout(sdk, spec, config);
-          if (result.response && await compareResponses(originalResp, result.response)) {
+          if (result.response && matchesBaseline(baseline, result.response)) {
             cookies = remaining;
             if (remaining.length) {
               originalHeaders[headerKey] = [remaining.join('; ')];
@@ -555,7 +710,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
       }
       await delay(config.rateLimit.minDelayMs);
       const res = await sendRequestWithTimeout(sdk, test, config);
-      if (res.response && await compareResponses(originalResp, res.response)) {
+      if (res.response && matchesBaseline(baseline, res.response)) {
         minimalHeaders = minimalHeaders.filter(h => h !== headerKey);
       }
       }
@@ -570,7 +725,7 @@ async function minimizeRequest(sdk: SDK<API>, requestId: string, config: Minimiz
         minimalBody = await minimizeJsonBody(
           sdk,
           minimalBody,
-          originalResp,
+          baseline,
           reqData,
           minimalQuery,
           minimalHeaders, // Now use the minimized headers
