@@ -4,7 +4,7 @@ import App from "./views/App.vue";
 import { type FrontendSDK } from "./types";
 import { Classic } from "@caido/primevue";
 import PrimeVue from "primevue/config";
-import { addJob, finishJob, runningCount, genJobId } from "./jobs";
+import { addJob, removeJob, runningCount, genJobId } from "./jobs";
 
 
 const DEFAULT_CONFIG = {
@@ -122,13 +122,11 @@ export async function init(sdk: FrontendSDK) {
 
         if (result instanceof Error) {
           console.error('Minimization error:', result);
-          finishJob(jobId, "failed", result.message);
           sdk.window.showToast(`Error: ${result.message}`, { variant: "error" });
           return;
         }
 
         if (result._type === "success" && result.requestId) {
-          finishJob(jobId, "completed", result.message);
           sdk.window.showToast(result.message || "Request minimized successfully!", { variant: "success", duration: 6000 });
           try {
             if (config && typeof config === 'object' && 'openTabAfterMinimize' in config && config.openTabAfterMinimize) {
@@ -139,22 +137,19 @@ export async function init(sdk: FrontendSDK) {
             sdk.window.showToast("Request minimized but failed to open replay tab", { variant: "warning" });
           }
         } else if (result._type === "cancelled") {
-          finishJob(jobId, "cancelled", result.message);
           sdk.window.showToast(result.message || "Minimization cancelled", { variant: "info" });
         } else if (result._type === "warning") {
-          finishJob(jobId, "completed", result.message);
           sdk.window.showToast(result.message || "Request minimized with warnings", { variant: "warning" });
         } else {
           console.error('Unexpected result type:', result);
-          finishJob(jobId, "failed", result.message);
           sdk.window.showToast(result.message || "Unknown error occurred", { variant: "error" });
         }
       } catch (error: unknown) {
         console.error('Minimization error:', error);
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-        finishJob(jobId, "failed", errorMessage);
         sdk.window.showToast(`Error: ${errorMessage}`, { variant: "error" });
       } finally {
+        removeJob(jobId);
         updateBadge();
       }
     }
